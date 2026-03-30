@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SEO Audit Tool</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ════════════════════════════════════
+     HEADER
+════════════════════════════════════ -->
+<header class="header">
+  <div class="header-logo">
+    <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="28" height="28" rx="7" fill="url(#lg)"/>
+      <path d="M7 20L11.5 9.5l4 7.5 3-4.5 3.5 5.5" stroke="white" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="19.5" cy="10" r="2.2" fill="white" opacity="0.9"/>
+      <defs>
+        <linearGradient id="lg" x1="0" y1="0" x2="28" y2="28">
+          <stop offset="0%" stop-color="#6366f1"/>
+          <stop offset="100%" stop-color="#4f46e5"/>
+        </linearGradient>
+      </defs>
+    </svg>
+    <span class="brand">SEO Audit Tool</span>
+    <span class="version">v2.0 GUI</span>
+  </div>
+
+  <nav class="header-nav">
+    <button class="nav-btn" onclick="
+      loadReportsList();
+      const p = document.getElementById('reports-panel');
+      p.classList.remove('hidden');
+      p.scrollIntoView({behavior:'smooth'});">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      Reports
+    </button>
+    <button class="nav-btn" onclick="toast('CLI mode: python main.py --url &lt;url&gt;','info')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+      CLI Mode
+    </button>
+  </nav>
+</header>
+
+
+<!-- ════════════════════════════════════
+     LAYOUT
+════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- ══════════════════════════════════
+       SIDEBAR — CONFIGURATION
+  ══════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <!-- ── Target URLs ──────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="2" y1="12" x2="22" y2="12"/>
+          <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
+        </svg>
+        <span class="section-title">Target URLs</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      <div class="section-body">
+        <!-- Mode toggle -->
+        <div class="mode-toggle">
+          <button class="mode-btn active" id="mode-single">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="2" y1="12" x2="22" y2="12"/>
+            </svg>
+            Single URL
+          </button>
+          <button class="mode-btn" id="mode-multi">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="8" y1="6" x2="21" y2="6"/>
+              <line x1="8" y1="12" x2="21" y2="12"/>
+              <line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6" x2="3.01" y2="6"/>
+              <line x1="3" y1="12" x2="3.01" y2="12"/>
+              <line x1="3" y1="18" x2="3.01" y2="18"/>
+            </svg>
+            Multiple URLs
+          </button>
+        </div>
+
+        <!-- Single URL -->
+        <div id="single-wrap">
+          <div class="field-label">URL <span class="required">*</span></div>
+          <input type="url" id="single-url" class="input-field"
+                 placeholder="https://example.com"
+                 value="https://www.anthropic.com/">
+        </div>
+
+        <!-- Multiple URLs -->
+        <div id="multi-wrap" class="hidden">
+          <div class="field-label">URLs <span class="required">*</span></div>
+          <textarea id="multi-urls" class="input-field"
+            placeholder="https://site1.com&#10;https://site2.com&#10;# lines starting with # are skipped"></textarea>
+          <div class="field-hint">One URL per line.</div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ── Crawl Settings ───────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+          <line x1="12" y1="22.08" x2="12" y2="12"/>
+        </svg>
+        <span class="section-title">Crawl Settings</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      <div class="section-body">
+
+        <div>
+          <div class="field-label">Crawl Depth</div>
+          <div class="range-row">
+            <input type="range" id="depth-range" min="1" max="10" value="1" step="1">
+            <input type="text"  id="depth-val" class="range-value" readonly>
+          </div>
+          <div class="field-hint">How many link-levels deep from the start URL.</div>
+        </div>
+
+        <div>
+          <div class="field-label">Max Pages</div>
+          <div class="range-row">
+            <input type="range" id="maxpages-range" min="0" max="300" value="0" step="5">
+            <input type="text"  id="maxpages-val" class="range-value" readonly>
+          </div>
+          <div class="field-hint">0 = unlimited pages per site.</div>
+        </div>
+
+        <div>
+          <div class="field-label">Request Delay</div>
+          <div class="range-row">
+            <input type="range" id="delay-range" min="0" max="3" value="0.3" step="0.1">
+            <input type="text"  id="delay-val" class="range-value" readonly>
+          </div>
+          <div class="field-hint">Seconds between requests (be polite to servers).</div>
+        </div>
+
+        <div>
+          <div class="field-label">Concurrency</div>
+          <div class="range-row">
+            <input type="range" id="concur-range" min="1" max="50" value="10" step="1">
+            <input type="text"  id="concur-val" class="range-value" readonly>
+          </div>
+          <div class="field-hint">Max simultaneous async fetch connections.</div>
+        </div>
+
+      </div>
+    </div>
+
+
+    <!-- ── Analysis Settings ────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <span class="section-title">Analysis Settings</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      <div class="section-body">
+        <div>
+          <div class="field-label">Target Keyword</div>
+          <input type="text" id="keyword" class="input-field"
+                 placeholder="e.g. seo audit tool  (optional)">
+          <div class="field-hint">Used for keyword density checks in content &amp; headings modules.</div>
+        </div>
+
+        <div>
+          <div class="field-label">PageSpeed API Key</div>
+          <input type="password" id="ps-key" class="input-field"
+                 placeholder="AIza... — leave blank to use .env value">
+          <div class="field-hint">Google PageSpeed Insights key for real Core Web Vitals data.</div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ── Check Modules ────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="9 11 12 14 22 4"/>
+          <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+        </svg>
+        <span class="section-title">Check Modules (23)</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      <div class="section-body">
+        <div class="checks-toolbar">
+          <button class="chip-btn accent" id="btn-select-all">All</button>
+          <button class="chip-btn" id="btn-deselect-all">None</button>
+          <button class="chip-btn" id="btn-site-only">Site-wide</button>
+          <button class="chip-btn" id="btn-page-only">Per-page</button>
+        </div>
+        <div class="checks-list" id="checks-container">
+          <!-- Populated by app.js buildChecksUI() -->
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ── Report Format ─────────────────────────────────── -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+        <span class="section-title">Report Format</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      <div class="section-body">
+        <div class="format-row">
+          <div class="format-card selected" id="fmt-docx-card">
+            <input type="checkbox" id="fmt-docx" checked>
+            <div>
+              <div class="fmt-icon">📄</div>
+              <div class="fmt-label">DOCX</div>
+              <div class="fmt-sub">Word document, A4 landscape</div>
+            </div>
+          </div>
+          <div class="format-card" id="fmt-html-card">
+            <input type="checkbox" id="fmt-html">
+            <div>
+              <div class="fmt-icon">🌐</div>
+              <div class="fmt-label">HTML</div>
+              <div class="fmt-sub">Self-contained web report</div>
+            </div>
+          </div>
+        </div>
+        <div class="field-hint">
+          Reports saved to <code style="color:var(--accent);font-size:.72rem">reports/</code> and available for download after audit completes.
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ── Run button ─────────────────────────────────────── -->
+    <div class="run-section">
+      <button class="run-btn" id="run-btn">
+        <span class="spinner hidden" id="run-btn-spinner"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             width="17" height="17" id="run-btn-icon">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span id="run-btn-text">Run Audit</span>
+      </button>
+    </div>
+
+  </aside><!-- /sidebar -->
+
+
+  <!-- ══════════════════════════════════
+       MAIN — OUTPUT PANEL
+  ══════════════════════════════════ -->
+  <main class="main">
+
+    <!-- Empty / welcome state -->
+    <div id="empty-state" class="empty-state">
+      <div class="empty-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="34" height="34">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          <line x1="11" y1="8" x2="11" y2="14"/>
+          <line x1="8" y1="11" x2="14" y2="11"/>
+        </svg>
+      </div>
+      <h2>Ready to Audit</h2>
+      <p>Enter a URL, configure your options, and click <strong style="color:var(--accent)">Run Audit</strong> to start a full SEO analysis with real-time progress.</p>
+      <div class="quick-steps">
+        <div class="quick-step"><span class="step-num">1</span>Enter URL(s)</div>
+        <div class="quick-step"><span class="step-num">2</span>Set crawl depth</div>
+        <div class="quick-step"><span class="step-num">3</span>Pick modules</div>
+        <div class="quick-step"><span class="step-num">4</span>Choose format</div>
+        <div class="quick-step"><span class="step-num">5</span>Run &amp; Download</div>
+      </div>
+    </div>
+
+
+    <!-- Output (shown once audit starts) -->
+    <div id="output-content" class="hidden">
+
+      <!-- ① Progress bar -->
+      <div id="progress-wrap" class="progress-wrap hidden">
+        <div class="progress-top">
+          <span class="progress-label" id="progress-label">Running checks...</span>
+          <div class="progress-right">
+            <span class="progress-count" id="progress-count">0 / 0 modules</span>
+            <span class="progress-pct"   id="progress-pct">0%</span>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+        </div>
+      </div>
+
+      <!-- ② Current module indicator -->
+      <div id="current-mod-wrap" class="current-mod-wrap hidden">
+        <div class="current-mod-inner">
+          <div class="pulse-ring"></div>
+          <div class="current-mod-info">
+            <span class="current-mod-label">Currently Running</span>
+            <span class="current-mod-name" id="current-mod-name">—</span>
+          </div>
+          <div class="current-mod-right">
+            <span class="current-mod-scope" id="current-mod-scope"></span>
+            <span class="current-mod-num"   id="current-mod-num">0 / 0</span>
+            <span class="mod-result-badge hidden" id="current-mod-result"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ③ Live log terminal -->
+      <div class="log-panel">
+        <div class="log-header">
+          <div class="log-dots">
+            <div class="log-dot dot-r"></div>
+            <div class="log-dot dot-y"></div>
+            <div class="log-dot dot-g"></div>
+          </div>
+          <span class="log-title">audit.log — live stream</span>
+          <span class="log-status-pill pill-idle" id="log-status-pill">Idle</span>
+        </div>
+        <div class="log-body" id="log-body"></div>
+      </div>
+
+      <!-- ④ Score + module grid + downloads — injected by JS when done -->
+      <div id="results-wrap"></div>
+
+    </div><!-- /output-content -->
+
+
+    <!-- Previous reports panel -->
+    <div id="reports-panel" class="reports-panel hidden">
+      <div class="reports-panel-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             width="13" height="13" style="color:var(--accent)">
+          <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+        </svg>
+        <span class="reports-panel-title">Previous Reports</span>
+        <button class="nav-btn" style="font-size:.7rem;padding:.2rem .55rem"
+                onclick="loadReportsList()">Refresh</button>
+      </div>
+      <div class="reports-list" id="reports-list"></div>
+    </div>
+
+  </main><!-- /main -->
+
+</div><!-- /layout -->
+
+<!-- Toast container -->
+<div id="toast-container" class="toast-container"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

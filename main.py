@@ -32,7 +32,7 @@ load_dotenv()
 
 # Set a single URL here to test just one site without editing targets.txt.
 # Leave as empty string "" to use targets.txt instead.
-target_website = "https://abhijeetsahoo.in/"
+target_website = "https://www.anthropic.com/"
 
 # Primary SEO keyword for density and heading checks.
 # Leave as empty string "" if you don't want keyword analysis.
