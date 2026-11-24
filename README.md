@@ -1,6 +1,6 @@
 # SEO Audit Tool
 
-An asynchronous, comprehensive Technical and On-Page SEO Audit Tool that crawls websites, runs 23 different SEO checks, and generates detailed reports in HTML and DOCX formats. Supports both a **Web GUI** (`app.py`) and a **CLI** (`main.py`).
+An asynchronous, comprehensive Technical and On-Page SEO Audit Tool that crawls websites, runs 25 different SEO checks, and generates detailed reports in HTML, DOCX and JSON formats. Supports both a **Web GUI** (`app.py`) and a **CLI** (`main.py`).
 
 ---
 
@@ -19,8 +19,8 @@ An asynchronous, comprehensive Technical and On-Page SEO Audit Tool that crawls 
   - Single URL or batch (multi-line) URL input
   - All crawl settings controllable via sliders (depth, max pages, delay, concurrency)
   - Target keyword and PageSpeed API key fields
-  - Per-module selection: pick any of the 23 checks individually, or filter by site-wide / per-page scope
-  - Report format selection: DOCX, HTML, or both
+  - Per-module selection: pick any of the 25 checks individually, or filter by site-wide / per-page scope
+  - Report format selection: DOCX, HTML, JSON
   - Real-time log stream — every print from the crawl and all check modules appears live
   - Live progress bar showing X/Y modules completed with % indicator
   - "Currently Running" indicator showing the active module name, scope, and result badge
@@ -30,14 +30,14 @@ An asynchronous, comprehensive Technical and On-Page SEO Audit Tool that crawls 
   - Previous reports history panel
 
 - **Asynchronous Crawling:** BFS crawler using `aiohttp`/`asyncio` with configurable concurrency, delay, and depth.
-- **23 Comprehensive SEO Checks:** Site-wide and per-page modules covering all major SEO dimensions.
+- **25 Comprehensive SEO Checks:** Site-wide and per-page modules covering all major SEO dimensions.
 - **Dual Reporting:** Generates `.docx` (A4 landscape, colour-coded tables) and `.html` (self-contained, interactive) reports.
 - **PageSpeed Integration:** Real Core Web Vitals via Google PageSpeed Insights API (falls back to heuristics).
 - **Batch Auditing:** Audit multiple URLs at once via the GUI or via `targets.txt` in CLI mode.
 
 ---
 
-## The 23 SEO Checks
+## The 25 SEO Checks
 
 ### 1. Technical & Architecture
 1. **HTTPS Security** — TLS validation, mixed-content detection
@@ -74,6 +74,10 @@ An asynchronous, comprehensive Technical and On-Page SEO Audit Tool that crawls 
 22. **Social OpenGraph** — `og:` tags, Twitter Cards, share preview data
 23. **Analytics Tracking** — Google Analytics, GTM embed detection
 
+### 7. AI Search & Live Data
+24. **AI Search / GEO Readiness** — llms.txt, AI search crawler access in robots.txt, content visible without JavaScript, FAQ/entity/author/date signals, nosnippet
+25. **Backlinks (Live Data)** — referring domains, backlinks, authority, spam score from a JSON file (`--backlinks-json`, e.g. Agensi's backlink tool)
+
 ---
 
 ## Prerequisites
@@ -108,14 +112,14 @@ echo "PAGESPEED_API_KEY=your_key_here" > .env
 
 ```bash
 python app.py
-# → Opens http://localhost:5000 in your browser automatically
+# → Opens http://localhost:5000 (bound to 127.0.0.1; set SEO_GUI_HOST=0.0.0.0 to share on your LAN)
 ```
 
 - Enter a URL (or switch to multi-URL mode for batch audits)
 - Adjust crawl depth, max pages, delay, and concurrency via sliders
 - Optionally enter a target keyword and PageSpeed API key
-- Select which of the 23 modules to run (defaults to all)
-- Choose DOCX and/or HTML report format
+- Select which of the 25 modules to run (defaults to all)
+- Choose DOCX, HTML and/or JSON report format
 - Click **Run Audit** — watch the live log and progress bar
 - When complete, click **Download** to save the report
 
@@ -146,6 +150,10 @@ python main.py --url URL --depth N --max-pages N --delay 0.3 --concurrency 10 --
 | `--concurrency` | 10 | Async connections |
 | `--keyword` | — | Target keyword for density checks |
 | `--output` | auto | Output filename prefix |
+| `--output-dir` | reports | Folder for reports |
+| `--format` | docx,html | Any of `docx`, `html`, `json` (comma-separated) |
+| `--json` | off | Shorthand to add JSON output |
+| `--backlinks-json` | — | JSON file with live backlink data for check 25 |
 
 ---
 
@@ -163,7 +171,8 @@ SEO/
 ├── reports/                # Generated reports saved here
 ├── checks/
 │   ├── __init__.py         # ALL_CHECKS registry, MODULE_TITLES, SITE_WIDE_CHECKS
-│   └── check_*.py          # 23 individual check modules
+│   ├── _http.py            # cached HTTP session, parallel helpers, PageSpeed
+│   └── check_*.py          # 25 individual check modules
 ├── templates/
 │   └── index.html          # Web GUI HTML template
 └── static/

@@ -4,10 +4,19 @@ import hashlib
 from collections import Counter
 
 
+_INVISIBLE = {"script", "style", "noscript", "head", "meta", "link", "template", "title"}
+
+
 def _get_visible_text(soup) -> str:
-    for tag in soup(["script", "style", "noscript", "head", "meta", "link"]):
-        tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
+    """Visible text without copying or mutating the soup (much faster than re-parsing)."""
+    parts = []
+    for s in soup.find_all(string=True):
+        if any(p.name in _INVISIBLE for p in s.parents if p.name):
+            continue
+        t = s.strip()
+        if t:
+            parts.append(t)
+    return " ".join(parts)
 
 
 def check_content_quality(url: str, soup, response, keyword: str = None,
@@ -16,10 +25,7 @@ def check_content_quality(url: str, soup, response, keyword: str = None,
     if content_hashes is None:
         content_hashes = {}
 
-    # Work on a copy to avoid mutating the original soup
-    from bs4 import BeautifulSoup
-    soup_copy = BeautifulSoup(str(soup), "lxml")
-    visible_text = _get_visible_text(soup_copy)
+    visible_text = _get_visible_text(soup)
     words = re.findall(r'\b\w+\b', visible_text)
     word_count = len(words)
     html_len = len(response.text)
@@ -54,9 +60,13 @@ def check_content_quality(url: str, soup, response, keyword: str = None,
 
     # 4. Keyword density
     if keyword:
-        kw_lower = keyword.lower()
-        kw_count = sum(1 for w in words if w.lower() == kw_lower)
-        density = (kw_count / word_count * 100) if word_count > 0 else 0
+        # Works for phrases too ("humic acid"): count phrase occurrences, then
+        # density = words belonging to the phrase / all words.
+        kw_tokens = re.findall(r'\b\w+\b', keyword.lower())
+        n = len(kw_tokens) or 1
+        lower_words = [w.lower() for w in words]
+        kw_count = sum(1 for i in range(len(lower_words) - n + 1) if lower_words[i:i + n] == kw_tokens)
+        density = (kw_count * n / word_count * 100) if word_count > 0 else 0
         if 1 <= density <= 3:
             checks.append({"name": "Keyword density (1–3%)", "status": "pass", "detail": f"Keyword \"{keyword}\" density: {density:.1f}%"})
         elif density == 0:
@@ -115,7 +125,8 @@ def check_content_quality(url: str, soup, response, keyword: str = None,
         checks.append({"name": "Structured content (lists/tables)", "status": "warning", "detail": "No lists or tables found — consider adding structured content"})
 
     # 10. Alt text on all images (cross-reference)
-    imgs_missing_alt = [img.get("src", "")[:60] for img in soup.find_all("img") if not img.get("alt")]
+    # alt="" is valid for decorative images, so only a missing attribute fails (same rule as image_optimization)
+    imgs_missing_alt = [img.get("src", "")[:60] for img in soup.find_all("img") if img.get("alt") is None]
     if not imgs_missing_alt:
         checks.append({"name": "All images have alt text", "status": "pass", "detail": "All <img> tags have alt attributes"})
     else:

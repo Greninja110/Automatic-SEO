@@ -12,17 +12,14 @@ def check_robots_txt(url: str, soup, response, session=None,
     robots_text = robots_txt_content or ""
     robots_status = None
 
-    # Fetch robots.txt if not already done
+    robots_ctype = ""
     if not robots_text and session:
         try:
             r = session.get(f"{base_url}/robots.txt", timeout=10)
             robots_status = r.status_code
-            if r.status_code == 200:
+            robots_ctype = r.headers.get("Content-Type", "")
+            if r.status_code == 200 and "html" not in robots_ctype.lower():
                 robots_text = r.text
-                # Store for other modules
-                kwargs_ref = kwargs.get("_shared_state")
-                if kwargs_ref is not None:
-                    kwargs_ref["robots_txt_content"] = robots_text
         except Exception as e:
             checks.append({"name": "robots.txt accessible", "status": "fail",
                             "detail": f"Error fetching robots.txt: {str(e)[:80]}"})
@@ -43,38 +40,46 @@ def check_robots_txt(url: str, soup, response, session=None,
         return {"checks": checks, "summary": "robots.txt not found."}
 
     # 2. Content-Type is text/plain
-    content_type_ok = True
-    if robots_status and session:
-        try:
-            r = session.head(f"{base_url}/robots.txt", timeout=5)
-            ct = r.headers.get("Content-Type", "")
-            if "text/plain" in ct:
-                checks.append({"name": "robots.txt is text/plain", "status": "pass",
-                                "detail": f"Content-Type: {ct}"})
-            else:
-                checks.append({"name": "robots.txt is text/plain", "status": "warning",
-                                "detail": f"Unexpected Content-Type: {ct}"})
-        except Exception:
+    if robots_status:
+        if "text/plain" in robots_ctype.lower():
+            checks.append({"name": "robots.txt is text/plain", "status": "pass",
+                            "detail": f"Content-Type: {robots_ctype}"})
+        else:
             checks.append({"name": "robots.txt is text/plain", "status": "warning",
-                            "detail": "Could not verify Content-Type header"})
+                            "detail": f"Unexpected Content-Type: {robots_ctype or 'none'}"})
     else:
         checks.append({"name": "robots.txt is text/plain", "status": "pass",
                         "detail": "robots.txt content retrieved (Content-Type assumed text/plain)"})
 
-    # Parse rules
-    lines = [l.strip() for l in robots_text.splitlines() if l.strip() and not l.startswith("#")]
-    current_ua = None
+    # Parse rules into user-agent groups. Consecutive User-agent lines share
+    # the rules that follow them (RFC 9309), e.g.
+    #   User-agent: a
+    #   User-agent: b
+    #   Disallow: /x      ← applies to both a and b
     rules = {}  # {user_agent: [{"type": allow/disallow, "path": ...}]}
-    for line in lines:
-        if line.lower().startswith("user-agent:"):
-            current_ua = line.split(":", 1)[1].strip().lower()
-            rules.setdefault(current_ua, [])
-        elif line.lower().startswith("disallow:") and current_ua is not None:
-            path = line.split(":", 1)[1].strip()
-            rules[current_ua].append({"type": "disallow", "path": path})
-        elif line.lower().startswith("allow:") and current_ua is not None:
-            path = line.split(":", 1)[1].strip()
-            rules[current_ua].append({"type": "allow", "path": path})
+    group = []
+    last_was_ua = False
+    for raw in robots_text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        field, value = (p.strip() for p in line.split(":", 1))
+        field = field.lower()
+        if field == "user-agent":
+            if not last_was_ua:
+                group = []
+            ua = value.lower()
+            group.append(ua)
+            rules.setdefault(ua, [])
+            last_was_ua = True
+        elif field in ("allow", "disallow"):
+            last_was_ua = False
+            if not value and field == "disallow":
+                continue  # empty Disallow = allow everything
+            for ua in group:
+                rules[ua].append({"type": field, "path": value})
+        else:
+            last_was_ua = False
 
     star_rules = rules.get("*", [])
 

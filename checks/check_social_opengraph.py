@@ -1,6 +1,8 @@
 """Module 17: Social & Open Graph"""
 from urllib.parse import urljoin
 
+from checks._http import head_status
+
 
 def check_social_opengraph(url: str, soup, response, session=None, **kwargs) -> dict:
     checks = []
@@ -51,18 +53,16 @@ def check_social_opengraph(url: str, soup, response, session=None, **kwargs) -> 
 
     # 6. og:image reachable
     if og_image and session:
-        try:
-            img_url = urljoin(url, og_image)
-            r = session.head(img_url, timeout=8, allow_redirects=True)
-            if r.status_code < 400:
-                checks.append({"name": "og:image reachable", "status": "pass",
-                                "detail": f"og:image returns HTTP {r.status_code}"})
-            else:
-                checks.append({"name": "og:image reachable", "status": "fail",
-                                "detail": f"og:image unreachable (HTTP {r.status_code}): {og_image[:60]}"})
-        except Exception as e:
+        status_code, _ = head_status(session, urljoin(url, og_image))
+        if status_code is None:
             checks.append({"name": "og:image reachable", "status": "warning",
-                            "detail": f"Could not check og:image: {str(e)[:60]}"})
+                            "detail": f"Could not check og:image: {og_image[:60]}"})
+        elif status_code < 400:
+            checks.append({"name": "og:image reachable", "status": "pass",
+                            "detail": f"og:image returns HTTP {status_code}"})
+        else:
+            checks.append({"name": "og:image reachable", "status": "fail",
+                            "detail": f"og:image unreachable (HTTP {status_code}): {og_image[:60]}"})
     elif og_image:
         checks.append({"name": "og:image reachable", "status": "warning",
                         "detail": "og:image found but no session to verify reachability"})

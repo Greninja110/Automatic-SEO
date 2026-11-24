@@ -1,7 +1,7 @@
 """Module 9: Page Speed & Performance"""
-import re
-import json
 from urllib.parse import urlparse
+
+from checks._http import get_pagespeed
 
 
 def check_page_speed(url: str, soup, response, pagespeed_api_key: str = None, session=None, **kwargs) -> dict:
@@ -44,7 +44,6 @@ def check_page_speed(url: str, soup, response, pagespeed_api_key: str = None, se
         checks.append({"name": "No render-blocking scripts in <head>", "status": "warning", "detail": "No <head> found"})
 
     # 4. Render-blocking CSS
-    head = soup.find("head")
     if head:
         blocking_css = [l.get("href", "")[:60] for l in head.find_all("link", rel="stylesheet")
                         if l.get("media") not in ["print"] and not l.get("as")]
@@ -104,10 +103,7 @@ def check_page_speed(url: str, soup, response, pagespeed_api_key: str = None, se
     # 10. PageSpeed Insights API
     if pagespeed_api_key and session:
         try:
-            api_url = (f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-                       f"?url={url}&key={pagespeed_api_key}&strategy=mobile")
-            r = session.get(api_url, timeout=30)
-            data = r.json()
+            data = get_pagespeed(session, url, pagespeed_api_key)
             perf_score = data.get("categories", {}).get("performance", {}).get("score", None)
             if perf_score is not None:
                 pct = int(perf_score * 100)
@@ -119,7 +115,7 @@ def check_page_speed(url: str, soup, response, pagespeed_api_key: str = None, se
                                 "detail": "PageSpeed API returned data but no performance score found"})
         except Exception as e:
             checks.append({"name": "PageSpeed Insights performance score", "status": "warning",
-                            "detail": f"PageSpeed API error: {str(e)[:80]}"})
+                            "detail": f"PageSpeed API error: {str(e)[:140]}"})
     else:
         checks.append({"name": "PageSpeed Insights performance score", "status": "warning",
                         "detail": "No PageSpeed API key — add PAGESPEED_API_KEY to .env for real CWV data"})

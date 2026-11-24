@@ -1,11 +1,12 @@
 """Module 22: Crawl Errors"""
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from checks._http import head_status, parallel_map
 
 
 def check_crawl_errors(url: str, soup, response, all_urls: list = None,
-                        session=None, sitemap_urls: list = None, **kwargs) -> dict:
+                        session=None, sitemap_urls: list = None, crawl_statuses: dict = None,
+                        crawl_times: dict = None, linked_urls: set = None, **kwargs) -> dict:
     checks = []
     pages_to_check = all_urls or [url]
 
@@ -17,32 +18,31 @@ def check_crawl_errors(url: str, soup, response, all_urls: list = None,
         checks.append({"name": "Current page returns 200 OK", "status": "fail",
                         "detail": f"Unexpected status {response.status_code}: {url}"})
 
-    # 2 & 3. 4xx and 5xx in crawl
+    # 2 & 3. 4xx and 5xx in crawl — the crawler already recorded every status
+    # and timing; only URLs it lacks are requested again.
     four_xx = []
     five_xx = []
     response_times = []
+    sample = pages_to_check[:50]
+    crawl_statuses = crawl_statuses or {}
+    crawl_times = crawl_times or {}
 
     def check_one(check_url):
-        try:
-            start = time.time()
-            r = session.head(check_url, timeout=8, allow_redirects=True)
-            elapsed = time.time() - start
-            return check_url, r.status_code, elapsed
-        except Exception as e:
-            return check_url, None, None
+        if crawl_statuses.get(check_url) is not None:
+            return check_url, crawl_statuses[check_url], crawl_times.get(check_url)
+        start = time.time()
+        status, _ = head_status(session, check_url, timeout=8)
+        return check_url, status, (time.time() - start) if status else None
 
     if session and len(pages_to_check) > 1:
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(check_one, u): u for u in pages_to_check[:50]}
-            for future in as_completed(futures):
-                u, status, elapsed = future.result()
-                if elapsed is not None:
-                    response_times.append(elapsed)
-                if status:
-                    if 400 <= status < 500:
-                        four_xx.append(f"{u} (HTTP {status})")
-                    elif status >= 500:
-                        five_xx.append(f"{u} (HTTP {status})")
+        for u, status, elapsed in parallel_map(check_one, sample):
+            if elapsed is not None:
+                response_times.append(elapsed)
+            if status:
+                if 400 <= status < 500:
+                    four_xx.append(f"{u} (HTTP {status})")
+                elif status >= 500:
+                    five_xx.append(f"{u} (HTTP {status})")
 
     if four_xx:
         checks.append({"name": "No 4xx client errors in crawl", "status": "fail",
@@ -74,9 +74,6 @@ def check_crawl_errors(url: str, soup, response, all_urls: list = None,
                         "detail": f"No soft 404 indicators on {url}"})
 
     # 5. Crawl depth reachable (all pages loaded successfully)
-    unreachable = [u for u, s, _ in
-                   [(check_one(u2)) for u2 in pages_to_check[:20]] if s and s >= 400] \
-        if not session else []
     checks.append({"name": "All crawled pages reachable", "status": "pass" if not four_xx and not five_xx else "warning",
                     "detail": f"Crawled {min(len(pages_to_check), 50)} pages — {len(four_xx)+len(five_xx)} error(s)"})
 
@@ -105,43 +102,30 @@ def check_crawl_errors(url: str, soup, response, all_urls: list = None,
         checks.append({"name": "All internal links resolve", "status": "pass",
                         "detail": "All sampled internal links resolve correctly"})
 
-    # 8. No orphan pages (pages not linked from anywhere in crawl)
-    if len(pages_to_check) > 1:
-        # Build link map
-        all_linked = set()
-        all_linked.add(pages_to_check[0])  # start URL always reachable
-        for a in soup.find_all("a", href=True):
-            href = a.get("href", "")
-            if href.startswith("http"):
-                all_linked.add(href.rstrip("/"))
-        orphans = [u for u in pages_to_check if u.rstrip("/") not in
-                   {l.rstrip("/") for l in all_linked}]
+    # 8. Orphan candidates: URLs listed in the sitemap that no crawled page links to
+    if sitemap_urls and linked_urls is not None and len(pages_to_check) > 1:
+        linked = {u.rstrip("/").replace("://www.", "://") for u in linked_urls}
+        linked.update(u.rstrip("/").replace("://www.", "://") for u in pages_to_check)
+        orphans = [u for u in sitemap_urls
+                   if u.strip().rstrip("/").replace("://www.", "://") not in linked]
         if not orphans:
             checks.append({"name": "No orphan pages detected", "status": "pass",
-                            "detail": "All crawled pages are linked"})
+                            "detail": f"All {len(sitemap_urls)} sitemap URLs checked are linked from crawled pages"})
         else:
             checks.append({"name": "No orphan pages detected", "status": "warning",
-                            "detail": f"Potential orphan pages: {orphans[:3]}"})
+                            "detail": (f"{len(orphans)} sitemap URL(s) not linked from the {len(pages_to_check)} "
+                                       f"crawled page(s) — possible orphans (crawl deeper to confirm): {orphans[:3]}")})
     else:
         checks.append({"name": "No orphan pages detected", "status": "warning",
-                        "detail": "Single-page audit — orphan detection requires full crawl"})
+                        "detail": "Needs a sitemap and a multi-page crawl to compare against"})
 
     # 9. Sitemap URLs all return 200
     sitemap_errors = []
     if sitemap_urls and session:
-        def check_sm_url(sm_url):
-            try:
-                r = session.head(sm_url.strip(), timeout=8, allow_redirects=True)
-                return sm_url, r.status_code
-            except Exception:
-                return sm_url, None
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(check_sm_url, su): su for su in sitemap_urls[:30]}
-            for future in as_completed(futures):
-                sm_u, s = future.result()
-                if s and s >= 400:
-                    sitemap_errors.append(f"{sm_u} (HTTP {s})")
+        sm_sample = [u.strip() for u in sitemap_urls[:30]]
+        for sm_u, st in parallel_map(lambda u: (u, check_one(u)[1]), sm_sample):
+            if st and st >= 400:
+                sitemap_errors.append(f"{sm_u} (HTTP {st})")
 
     if sitemap_errors:
         checks.append({"name": "Sitemap URLs all return 200", "status": "fail",

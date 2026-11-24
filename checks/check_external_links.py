@@ -1,7 +1,7 @@
 """Module 7: External Links"""
-import re
 from urllib.parse import urlparse, urljoin
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from checks._http import head_status, parallel_map
 
 
 SPAM_TLDS = {".xyz", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw", ".top", ".click", ".loan"}
@@ -38,21 +38,12 @@ def check_external_links(url: str, soup, response, session=None, **kwargs) -> di
 
     # 1. External links reachable (sample up to 10)
     unreachable = []
+    probes = []  # (link_url, status, response)
     if session:
-        def check_link(item):
-            link_url, _ = item
-            try:
-                r = session.head(link_url, timeout=8, allow_redirects=True)
-                return link_url, r.status_code
-            except Exception:
-                return link_url, None
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(check_link, lnk): lnk for lnk in external_links[:10]}
-            for future in as_completed(futures):
-                lnk_url, status = future.result()
-                if status and status >= 400:
-                    unreachable.append(f"{lnk_url[:60]} ({status})")
+        sample = list(dict.fromkeys(lnk for lnk, _ in external_links))[:10]
+        probes = parallel_map(lambda u: (u, *head_status(session, u)), sample)
+        # 403/429 from bot protection (Cloudflare, LinkedIn…) does not mean the link is broken
+        unreachable = [f"{u[:60]} ({s})" for u, s, _ in probes if s and s >= 400 and s not in (403, 429, 999)]
     if unreachable:
         checks.append({"name": "External links reachable", "status": "fail", "detail": f"Unreachable: {unreachable[:3]}"})
     else:
@@ -84,7 +75,7 @@ def check_external_links(url: str, soup, response, session=None, **kwargs) -> di
     # 4. Sponsored links tagged
     sponsored = [(lnk[:50], a.get_text(strip=True)[:40]) for lnk, a in external_links
                  if "sponsored" in " ".join(a.get("rel") or [])]
-    checks.append({"name": "Sponsored links tagged", "status": "pass" if sponsored or True else "warning",
+    checks.append({"name": "Sponsored links tagged", "status": "pass",
                     "detail": f"{len(sponsored)} link(s) have rel=sponsored" if sponsored else "No sponsored links detected (informational)"})
 
     # 5. UGC links tagged
@@ -128,15 +119,8 @@ def check_external_links(url: str, soup, response, session=None, **kwargs) -> di
                         "detail": f"{len(generic_ext)} generic anchor(s): {[g[1] for g in generic_ext[:3]]}"})
 
     # 10. No redirect chains in external links (sample 3)
-    redirect_chains = []
-    if session:
-        for lnk, _ in external_links[:3]:
-            try:
-                r = session.get(lnk, timeout=8, allow_redirects=True)
-                if len(r.history) > 2:
-                    redirect_chains.append(f"{lnk[:60]} ({len(r.history)} hops)")
-            except Exception:
-                pass
+    redirect_chains = [f"{u[:60]} ({len(r.history)} hops)" for u, _, r in probes
+                       if r is not None and len(r.history) > 2]
     if redirect_chains:
         checks.append({"name": "No redirect chains in external links", "status": "warning", "detail": f"Redirect chains: {redirect_chains}"})
     else:

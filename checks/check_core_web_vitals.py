@@ -1,6 +1,7 @@
 """Module 19: Core Web Vitals"""
-import json
 from urllib.parse import urljoin
+
+from checks._http import get_pagespeed, parallel_map
 
 
 def check_core_web_vitals(url: str, soup, response,
@@ -11,18 +12,22 @@ def check_core_web_vitals(url: str, soup, response,
     # 1. LCP proxy: largest above-fold image < 500KB
     largest_img = {"src": None, "size": 0}
     if session and imgs:
+        img_urls = []
         for img in imgs[:8]:
             src = img.get("src") or img.get("data-src", "")
-            if not src or src.startswith("data:"):
-                continue
-            img_url = urljoin(url, src)
+            if src and not src.startswith("data:"):
+                img_urls.append(urljoin(url, src))
+
+        def _size(img_url):
             try:
                 head = session.head(img_url, timeout=5, allow_redirects=True)
-                size = int(head.headers.get("content-length", 0))
-                if size > largest_img["size"]:
-                    largest_img = {"src": img_url, "size": size}
+                return img_url, int(head.headers.get("content-length", 0) or 0)
             except Exception:
-                pass
+                return img_url, 0
+
+        for img_url, size in parallel_map(_size, img_urls):
+            if size > largest_img["size"]:
+                largest_img = {"src": img_url, "size": size}
 
     if largest_img["src"]:
         size_kb = largest_img["size"] / 1024
@@ -104,10 +109,7 @@ def check_core_web_vitals(url: str, soup, response,
 
     if pagespeed_api_key and session:
         try:
-            api_url = (f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-                       f"?url={url}&key={pagespeed_api_key}&strategy=mobile")
-            r = session.get(api_url, timeout=30)
-            data = r.json()
+            data = get_pagespeed(session, url, pagespeed_api_key)
             audits = data.get("lighthouseResult", {}).get("audits", {})
             perf_score = data.get("categories", {}).get("performance", {}).get("score")
 
@@ -135,9 +137,9 @@ def check_core_web_vitals(url: str, soup, response,
         except Exception as e:
             for _, label in api_metrics.items():
                 checks.append({"name": f"PageSpeed: {label}", "status": "warning",
-                                "detail": f"API error: {str(e)[:60]}"})
+                                "detail": f"API error: {str(e)[:140]}"})
             checks.append({"name": "PageSpeed: Overall Performance Score", "status": "warning",
-                            "detail": f"API error: {str(e)[:60]}"})
+                            "detail": f"API error: {str(e)[:140]}"})
     else:
         for _, label in api_metrics.items():
             checks.append({"name": f"PageSpeed: {label}", "status": "warning",

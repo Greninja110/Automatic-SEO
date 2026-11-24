@@ -1,4 +1,6 @@
-"""SEO Check Registry — imports all 23 modules and exposes ALL_CHECKS."""
+"""SEO Check Registry — imports all 25 modules and exposes ALL_CHECKS."""
+
+__version__ = "2.0.0"
 
 from checks.check_url_structure         import check_url_structure
 from checks.check_meta_tags             import check_meta_tags
@@ -23,6 +25,8 @@ from checks.check_technical_seo         import check_technical_seo
 from checks.check_content_accessibility import check_content_accessibility
 from checks.check_crawl_errors          import check_crawl_errors
 from checks.check_backlinks_authority   import check_backlinks_authority
+from checks.check_ai_search_readiness   import check_ai_search_readiness
+from checks.check_backlinks_live        import check_backlinks_live
 
 # Modules that run once per site on the homepage only (not per crawled page).
 # Add heavy API-based or site-level checks here to avoid 50x API calls.
@@ -35,6 +39,8 @@ SITE_WIDE_CHECKS = {
     "error_pages",
     "page_speed",        # PageSpeed API — run once on homepage only
     "core_web_vitals",   # PageSpeed API — run once on homepage only
+    "ai_search_readiness",  # llms.txt / AI crawler rules are site-level
+    "backlinks_live",       # backlink data is per domain
 }
 
 ALL_CHECKS = [
@@ -61,6 +67,8 @@ ALL_CHECKS = [
     ("content_accessibility",   check_content_accessibility),
     ("crawl_errors",            check_crawl_errors),
     ("backlinks_authority",     check_backlinks_authority),
+    ("ai_search_readiness",     check_ai_search_readiness),
+    ("backlinks_live",          check_backlinks_live),
 ]
 
 MODULE_TITLES = {
@@ -87,4 +95,6 @@ MODULE_TITLES = {
     "content_accessibility":   "21. Content Accessibility",
     "crawl_errors":            "22. Crawl Errors",
     "backlinks_authority":     "23. Backlinks & Authority",
+    "ai_search_readiness":     "24. AI Search / GEO Readiness",
+    "backlinks_live":          "25. Backlinks (Live Data)",
 }

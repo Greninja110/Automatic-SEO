@@ -11,8 +11,9 @@ let _urlCount     = 1;    // total URLs being audited
 let _currentUrlIdx = 0;   // 0-based index of URL being processed
 let _totalMods    = 0;    // modules to run per URL (from [X/Y] parsing)
 let _currentMod   = 0;    // last seen X from [X/Y]
+let _runningCell  = null; // module id of the board square being checked
 
-// All 23 checks (mirrors ALL_CHECKS in checks/__init__.py)
+// All 25 checks (mirrors ALL_CHECKS in checks/__init__.py)
 const ALL_CHECKS = [
   { id: "url_structure",         label: "1. URL Structure",            scope: "page" },
   { id: "meta_tags",             label: "2. Meta Tags",                scope: "page" },
@@ -37,6 +38,8 @@ const ALL_CHECKS = [
   { id: "content_accessibility", label: "21. Content Accessibility",   scope: "page" },
   { id: "crawl_errors",          label: "22. Crawl Errors",            scope: "site" },
   { id: "backlinks_authority",   label: "23. Backlinks & Authority",   scope: "page" },
+  { id: "ai_search_readiness",   label: "24. AI Search / GEO Readiness", scope: "site" },
+  { id: "backlinks_live",        label: "25. Backlinks (Live Data)",   scope: "site" },
 ];
 
 // ── DOM cache ──────────────────────────────────────────────
@@ -65,6 +68,9 @@ document.addEventListener("DOMContentLoaded", () => {
     fmtHtml:         document.getElementById("fmt-html"),
     fmtDocxCard:     document.getElementById("fmt-docx-card"),
     fmtHtmlCard:     document.getElementById("fmt-html-card"),
+    fmtJson:         document.getElementById("fmt-json"),
+    fmtJsonCard:     document.getElementById("fmt-json-card"),
+    board:           document.getElementById("board"),
     runBtn:          document.getElementById("run-btn"),
     runBtnText:      document.getElementById("run-btn-text"),
     runBtnSpinner:   document.getElementById("run-btn-spinner"),
@@ -97,8 +103,88 @@ document.addEventListener("DOMContentLoaded", () => {
   initChecksToolbar();
   bindRunButton();
   bindSectionToggles();
+  buildBoard();
+  bindHeaderNav();
   loadReportsList();
 });
+
+// ── Header navigation ──────────────────────────────────────
+function bindHeaderNav() {
+  document.getElementById("nav-reports").addEventListener("click", () => {
+    loadReportsList(true);
+  });
+  document.getElementById("nav-cli").addEventListener("click", () =>
+    toast("From a terminal: python main.py --url https://example.com", "info"));
+  document.getElementById("reports-refresh").addEventListener("click", () => loadReportsList());
+}
+
+// ── Inspection board (5×5, one square per check) ───────────
+const _cells = {};          // module id → cell element
+function moduleIdFromTitle(title) {
+  // "9. Page Speed & Performance" → page_speed (matched by the leading number)
+  const m = String(title).match(/^(\d+)\./);
+  if (!m) return null;
+  const c = ALL_CHECKS.find(x => x.label.startsWith(m[1] + "."));
+  return c ? c.id : null;
+}
+
+function buildBoard() {
+  $.board.innerHTML = "";
+  ALL_CHECKS.forEach(chk => {
+    const li = document.createElement("li");
+    const cell = document.createElement("div");
+    const num  = chk.label.split(".")[0];
+    const name = chk.label.replace(/^\d+\.\s*/, "");
+    cell.className = "cell";
+    cell.dataset.id = chk.id;
+    cell.innerHTML = `<span class="cell-count"></span>
+      <span class="cell-num">${num}</span><span class="cell-name">${escHtml(name)}</span>`;
+    cell.setAttribute("aria-label", `${num}. ${name}: not run yet`);
+    li.appendChild(cell);
+    $.board.appendChild(li);
+    _cells[chk.id] = cell;
+  });
+}
+
+function resetBoard(selectedIds) {
+  ALL_CHECKS.forEach(chk => {
+    const old = _cells[chk.id];
+    const fresh = document.createElement("div");   // drop old click handlers
+    fresh.className = "cell" + (selectedIds && !selectedIds.includes(chk.id) ? " is-off" : "");
+    fresh.dataset.id = chk.id;
+    fresh.innerHTML = old.innerHTML;
+    fresh.querySelector(".cell-count").textContent = "";
+    fresh.setAttribute("aria-label", old.getAttribute("aria-label").replace(/:.*$/, ": waiting"));
+    old.replaceWith(fresh);
+    _cells[chk.id] = fresh;
+  });
+}
+
+function markCell(id, state, count) {
+  const cell = _cells[id];
+  if (!cell) return;
+  cell.classList.remove("is-running", "is-pass", "is-warn", "is-fail");
+  cell.classList.add("is-" + state);
+  cell.querySelector(".cell-count").textContent = count ? String(count) : "";
+  const words = { running: "checking now", pass: "passed", warn: `${count} warnings`, fail: `${count} failures` };
+  cell.setAttribute("aria-label", cell.getAttribute("aria-label").replace(/:.*$/, ": " + words[state]));
+}
+
+function makeBoardClickable(modules) {
+  Object.entries(modules).forEach(([id, mod]) => {
+    const old = _cells[id];
+    if (!old) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = old.className;
+    btn.dataset.id = id;
+    btn.innerHTML = old.innerHTML;
+    btn.setAttribute("aria-label", old.getAttribute("aria-label") + " — open details");
+    btn.addEventListener("click", () => openModal(mod.title, mod.summary, mod.top_issues || []));
+    old.replaceWith(btn);
+    _cells[id] = btn;
+  });
+}
 
 // ── Range sliders ──────────────────────────────────────────
 function initRangeBindings() {
@@ -131,9 +217,9 @@ function setMode(mode) {
 
 // ── Format cards ───────────────────────────────────────────
 function initFormatCards() {
-  [[$.fmtDocxCard, $.fmtDocx], [$.fmtHtmlCard, $.fmtHtml]].forEach(([card, cb]) => {
+  [[$.fmtDocxCard, $.fmtDocx], [$.fmtHtmlCard, $.fmtHtml], [$.fmtJsonCard, $.fmtJson]].forEach(([card, cb]) => {
     const sync = () => card.classList.toggle("selected", cb.checked);
-    card.addEventListener("click", () => { cb.checked = !cb.checked; sync(); });
+    cb.addEventListener("change", sync);
     sync();
   });
 }
@@ -144,8 +230,8 @@ function buildChecksUI() {
   container.innerHTML = "";
 
   [
-    { label: "Site-wide (run once per site)", items: ALL_CHECKS.filter(c => c.scope === "site") },
-    { label: "Per-page (run on every crawled page)", items: ALL_CHECKS.filter(c => c.scope === "page") },
+    { label: "Whole site (run once)", items: ALL_CHECKS.filter(c => c.scope === "site") },
+    { label: "Every crawled page", items: ALL_CHECKS.filter(c => c.scope === "page") },
   ].forEach(({ label, items }) => {
     const lbl = document.createElement("div");
     lbl.className = "checks-group-label";
@@ -194,8 +280,9 @@ function bindSectionToggles() {
     hdr.addEventListener("click", e => {
       // Don't collapse when clicking toolbar buttons inside body
       const body = hdr.nextElementSibling;
-      hdr.classList.toggle("collapsed");
-      body.classList.toggle("hidden");
+      const collapsed = hdr.classList.toggle("collapsed");
+      body.classList.toggle("hidden", collapsed);
+      hdr.setAttribute("aria-expanded", String(!collapsed));
     });
   });
 }
@@ -211,13 +298,13 @@ function startAudit() {
   let urls = [];
   if (isSingle) {
     const u = $.singleUrl.value.trim();
-    if (!u) { toast("Enter a URL first", "error"); return; }
+    if (!u) { toast("Enter a website address to audit", "error"); return; }
     urls = [u];
   } else {
     urls = $.multiUrls.value.split("\n")
       .map(s => s.trim())
       .filter(s => s && !s.startsWith("#"));
-    if (!urls.length) { toast("Enter at least one URL", "error"); return; }
+    if (!urls.length) { toast("Enter at least one website address", "error"); return; }
   }
 
   // Collect selected checks
@@ -225,14 +312,15 @@ function startAudit() {
   document.querySelectorAll(".check-checkbox").forEach(cb => {
     if (cb.checked) selected.push(cb.dataset.id);
   });
-  if (!selected.length) { toast("Select at least one check module", "error"); return; }
+  if (!selected.length) { toast("Pick at least one check to run", "error"); return; }
   const selectedChecks = selected.length === ALL_CHECKS.length ? null : selected;
 
   // Collect formats
   const formats = [];
   if ($.fmtDocx.checked) formats.push("docx");
   if ($.fmtHtml.checked) formats.push("html");
-  if (!formats.length) { toast("Select at least one report format", "error"); return; }
+  if ($.fmtJson.checked) formats.push("json");
+  if (!formats.length) { toast("Pick at least one report file type", "error"); return; }
 
   // Reset progress state
   _urlCount      = urls.length;
@@ -257,6 +345,7 @@ function startAudit() {
   clearLog();
   setLogStatus("running");
   $.resultsWrap.innerHTML = "";
+  resetBoard(selected);
   updateProgress(0, _totalMods * _urlCount);
   hideCurrentModule();
 
@@ -305,12 +394,14 @@ function openStream(jobId) {
       if (data.status === "error") {
         setLogStatus("error");
         updateProgress(_totalMods * _urlCount, _totalMods * _urlCount, true);
-        toast("Audit failed — see log for details", "error");
+        toast("The audit stopped with an error. The crawl log shows where.", "error");
       } else {
         setLogStatus("done");
         updateProgress(_totalMods * _urlCount, _totalMods * _urlCount);
         renderResults(data.result || [], jobId);
-        toast("Audit complete!", "success");
+        const last = (data.result || []).slice(-1)[0];
+        if (last && last.modules) makeBoardClickable(last.modules);
+        toast("Audit finished", "success");
         loadReportsList();
       }
     }
@@ -322,7 +413,7 @@ function openStream(jobId) {
     setRunning(false);
     setLogStatus("error");
     hideCurrentModule();
-    toast("Connection lost — check server", "error");
+    toast("Lost contact with the server. Check that app.py is still running.", "error");
   };
 }
 
@@ -335,11 +426,15 @@ function processLogLine(text) {
   if (auditM) {
     _currentUrlIdx = parseInt(auditM[1]) - 1;
     _urlCount      = parseInt(auditM[2]);
+    if (_currentUrlIdx > 0) {
+      const sel = [...document.querySelectorAll(".check-checkbox")].filter(c => c.checked).map(c => c.dataset.id);
+      resetBoard(sel);
+    }
     return;
   }
 
   // ── "[X/Y] Module Title  (scope)" — check starting ─────
-  // Log format: "[ 1/23] 1. URL Structure  (1 page(s))"
+  // Log format: "[ 1/25] 1. URL Structure  (1 page(s))"
   const checkM = text.match(/^\[\s*(\d+)\/(\d+)\]\s+(.+?)\s{2,}\((.+?)\)/);
   if (checkM) {
     const x     = parseInt(checkM[1]);
@@ -355,6 +450,8 @@ function processLogLine(text) {
     const total = _urlCount * y;
     updateProgress(done, total);
     showCurrentModule(title, scope, x, y);
+    _runningCell = moduleIdFromTitle(title);
+    if (_runningCell) markCell(_runningCell, "running");
     return;
   }
 
@@ -369,6 +466,12 @@ function processLogLine(text) {
 
     // Update the current module indicator with result
     showCurrentModuleResult(pass, fail, warn, elapsed);
+    if (_runningCell) {
+      if (fail > 0)      markCell(_runningCell, "fail", fail);
+      else if (warn > 0) markCell(_runningCell, "warn", warn);
+      else               markCell(_runningCell, "pass");
+      _runningCell = null;
+    }
 
     // Advance progress by 1 (this module is now done)
     const done  = (_currentUrlIdx * _totalMods) + _currentMod;
@@ -391,14 +494,12 @@ function updateProgress(done, total, isError) {
   const pct = Math.min(100, Math.round((done / total) * 100));
 
   $.progressFill.style.width       = pct + "%";
-  $.progressFill.style.background  = isError
-    ? "linear-gradient(135deg,#ef4444,#dc2626)"
-    : "linear-gradient(135deg,#6366f1,#4f46e5)";
+  $.progressFill.classList.toggle("is-error", !!isError);
   $.progressPct.textContent        = pct + "%";
   $.progressCount.textContent      = `${done} / ${total} modules`;
   $.progressLabel.textContent      = done >= total
-    ? "All checks complete"
-    : "Running checks...";
+    ? "All checks finished"
+    : "Running checks";
 }
 
 // ── Current module display ─────────────────────────────────
@@ -417,13 +518,13 @@ function showCurrentModuleResult(pass, fail, warn, elapsed) {
 
   if (fail > 0) {
     badge.className = "mod-result-badge result-fail";
-    badge.textContent = `✗ ${fail} fail`;
+    badge.textContent = `${fail} failed`;
   } else if (warn > 0) {
     badge.className = "mod-result-badge result-warn";
-    badge.textContent = `⚠ ${warn} warn`;
+    badge.textContent = `${warn} warnings`;
   } else {
     badge.className = "mod-result-badge result-pass";
-    badge.textContent = `✓ ${pass} pass`;
+    badge.textContent = `${pass} passed`;
   }
 }
 
@@ -508,7 +609,7 @@ function clearLog() {
 function setRunning(on) {
   $.runBtn.disabled = on;
   $.runBtn.classList.toggle("running", on);
-  $.runBtnText.textContent = on ? "Running..." : "Run Audit";
+  $.runBtnText.textContent = on ? "Running audit…" : "Run audit";
   $.runBtnSpinner.classList.toggle("hidden", !on);
   // Show progress bar while running, keep it visible after finish
   if (on) $.progressWrap.classList.remove("hidden");
@@ -541,14 +642,7 @@ function renderResults(reports, jobId) {
     if (report.modules && Object.keys(report.modules).length) {
       const heading = document.createElement("div");
       heading.className = "modules-heading";
-      heading.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-          <rect x="3" y="3" width="7" height="7" rx="1"/>
-          <rect x="14" y="3" width="7" height="7" rx="1"/>
-          <rect x="3" y="14" width="7" height="7" rx="1"/>
-          <rect x="14" y="14" width="7" height="7" rx="1"/>
-        </svg>
-        Module Results — click any card for details`;
+      heading.innerHTML = `Results by check<span class="modules-hint">Open a row to see what it found</span>`;
       wrap.appendChild(heading);
 
       const grid = document.createElement("div");
@@ -574,57 +668,30 @@ function renderResults(reports, jobId) {
 function buildScoreCard(report, idx) {
   const s     = report.score || {};
   const pct   = s.score_pct || 0;
-  const R     = 45;
-  const circ  = +(2 * Math.PI * R).toFixed(2);  // 282.74
-  const offset = +(circ - (pct / 100) * circ).toFixed(2);
-  const color = pct >= 80 ? "var(--success)" : pct >= 60 ? "var(--warning)" : "var(--danger)";
+  const total = s.total || ((s.passed || 0) + (s.failed || 0) + (s.warnings || 0)) || 1;
+  const share = n => ((n || 0) / total * 100).toFixed(2) + "%";
+  const verdict = pct >= 80 ? "In good shape" : pct >= 60 ? "Needs work" : "Serious problems to fix";
 
   const el = document.createElement("div");
   el.className = "score-section";
   el.innerHTML = `
-    <div class="score-ring-wrap">
-      <svg class="score-ring" viewBox="0 0 110 110">
-        <circle class="ring-bg"   cx="55" cy="55" r="${R}"/>
-        <circle class="ring-fill" cx="55" cy="55" r="${R}"
-          stroke="${color}"
-          stroke-dasharray="${circ}"
-          stroke-dashoffset="${circ}"
-          id="score-ring-${idx}"/>
-      </svg>
-      <div class="score-number">
-        <span class="score-pct" style="color:${color}">${pct}</span>
-        <span class="score-of-100">/100</span>
-      </div>
+    <div class="score-figure" aria-label="SEO score ${pct} out of 100">
+      <span class="score-pct">${pct}</span><span class="score-of-100">/100</span>
     </div>
     <div class="score-meta">
-      <div class="score-title">SEO Score</div>
+      <div class="score-title">${verdict}</div>
       <div class="score-url">${escHtml(report.url || "")}</div>
+      <div class="score-split" aria-hidden="true">
+        <span class="sp-pass" style="width:${share(s.passed)}"></span>
+        <span class="sp-warn" style="width:${share(s.warnings)}"></span>
+        <span class="sp-fail" style="width:${share(s.failed)}"></span>
+      </div>
       <div class="score-pills">
-        <span class="score-pill pill-pass">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
-            <polyline points="20 6 9 17 4 12"/></svg>
-          ${s.passed || 0} passed
-        </span>
-        <span class="score-pill pill-fail">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          ${s.failed || 0} failed
-        </span>
-        <span class="score-pill pill-warn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
-            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          ${s.warnings || 0} warnings
-        </span>
+        <span class="score-pill pill-pass">${s.passed || 0} passed</span>
+        <span class="score-pill pill-warn">${s.warnings || 0} warnings</span>
+        <span class="score-pill pill-fail">${s.failed || 0} failed</span>
       </div>
     </div>`;
-
-  // Animate ring after DOM insertion
-  setTimeout(() => {
-    const ring = document.getElementById(`score-ring-${idx}`);
-    if (ring) ring.style.strokeDashoffset = offset;
-  }, 120);
-
   return el;
 }
 
@@ -638,19 +705,19 @@ function buildModuleCard(modId, mod) {
   if (fail > 0)      { stClass = "status-fail"; barColor = "var(--danger)";  }
   else if (warn > 0) { stClass = "status-warn"; barColor = "var(--warning)"; }
 
-  const card = document.createElement("div");
+  const card = document.createElement("button");
+  card.type = "button";
   card.className = `module-card ${stClass}`;
-  card.title = "Click to see details";
   card.innerHTML = `
-    <div class="module-card-title">${escHtml(title)}</div>
-    <div class="module-stats">
-      ${pass > 0 ? `<span class="stat-chip stat-pass">✓ ${pass}</span>` : ""}
-      ${fail > 0 ? `<span class="stat-chip stat-fail">✗ ${fail}</span>` : ""}
-      ${warn > 0 ? `<span class="stat-chip stat-warn">⚠ ${warn}</span>` : ""}
-    </div>
-    <div class="module-bar-wrap">
-      <div class="module-bar" style="width:${pctPass}%;background:${barColor}"></div>
-    </div>`;
+    <span class="module-card-title">${escHtml(title)}</span>
+    <span class="module-stats">
+      ${fail > 0 ? `<span class="stat-chip stat-fail">${fail} failed</span>` : ""}
+      ${warn > 0 ? `<span class="stat-chip stat-warn">${warn} warnings</span>` : ""}
+      ${!fail && !warn ? `<span class="stat-chip stat-pass">all ${pass} passed</span>` : ""}
+    </span>
+    <span class="module-bar-wrap" aria-hidden="true">
+      <span class="module-bar" style="display:block;width:${pctPass}%;background:${barColor}"></span>
+    </span>`;
 
   card.addEventListener("click", () =>
     openModal(title, summary, top_issues || []));
@@ -676,7 +743,7 @@ function openModal(title, summary, issues) {
     <div class="modal">
       <div class="modal-header">
         <span class="modal-title">${escHtml(title)}</span>
-        <button class="modal-close" id="mclose">
+        <button class="modal-close" id="mclose" type="button" aria-label="Close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
@@ -684,8 +751,7 @@ function openModal(title, summary, issues) {
       </div>
       <div class="modal-body">
         ${summary ? `<div class="modal-summary">${escHtml(summary)}</div>` : ""}
-        ${rows    || `<p style="text-align:center;color:var(--success);padding:1rem">
-                        All checks passed for this module!</p>`}
+        ${rows    || `<p class="modal-empty">Every check in this group passed.</p>`}
       </div>
     </div>`;
 
@@ -703,8 +769,7 @@ function buildDownloads(report, idx, jobId) {
   section.className = "downloads-section";
 
   const btns = Object.keys(report.files).map(fmt => {
-    const icons  = { docx: "📄", html: "🌐" };
-    const labels = { docx: "Download DOCX", html: "Download HTML" };
+    const labels = { docx: "Word report", html: "Web report", json: "JSON data" };
     return `
       <a class="download-btn ${fmt}" href="/download/${jobId}/${idx}/${fmt}" download>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -712,19 +777,12 @@ function buildDownloads(report, idx, jobId) {
           <polyline points="7 10 12 15 17 10"/>
           <line x1="12" y1="15" x2="12" y2="3"/>
         </svg>
-        ${icons[fmt] || ""} ${labels[fmt] || fmt.toUpperCase()}
+        ${labels[fmt] || fmt.toUpperCase()}
       </a>`;
   }).join("");
 
   section.innerHTML = `
-    <div class="downloads-heading">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-      Download Reports
-    </div>
+    <div class="downloads-heading">Download reports</div>
     <div class="download-group-url">${escHtml(report.url)}</div>
     <div class="download-btns">${btns}</div>`;
 
@@ -732,16 +790,20 @@ function buildDownloads(report, idx, jobId) {
 }
 
 // ── Reports history ────────────────────────────────────────
-function loadReportsList() {
+function loadReportsList(scrollTo) {
   fetch("/reports-list")
     .then(r => r.json())
     .then(files => {
-      if (!files.length) { $.reportsPanel.classList.add("hidden"); return; }
+      if (!files.length) {
+        $.reportsPanel.classList.add("hidden");
+        if (scrollTo) toast("No reports yet. Run an audit to create one.", "info");
+        return;
+      }
       $.reportsPanel.classList.remove("hidden");
       $.reportsList.innerHTML = "";
       files.slice(0, 30).forEach(f => {
         const ext  = f.name.split(".").pop().toLowerCase();
-        const icon = ext === "docx" ? "📄" : ext === "html" ? "🌐" : "📁";
+        const icon = ext.toUpperCase();
         const div  = document.createElement("div");
         div.className = "report-item";
         div.innerHTML = `
@@ -758,8 +820,9 @@ function loadReportsList() {
           </a>`;
         $.reportsList.appendChild(div);
       });
+      if (scrollTo) $.reportsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
     })
-    .catch(() => {});
+    .catch(() => toast("Couldn't load past reports. Is the server still running?", "error"));
 }
 
 // ── Toast ──────────────────────────────────────────────────

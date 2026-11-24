@@ -1,6 +1,6 @@
 """Module 1: URL Structure"""
 import re
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 
 
 def check_url_structure(url: str, soup, response, all_urls: list = None, **kwargs) -> dict:
@@ -52,7 +52,7 @@ def check_url_structure(url: str, soup, response, all_urls: list = None, **kwarg
         checks.append({"name": "Canonical tag present", "status": "pass", "detail": f"Canonical: {canonical_tag['href'][:100]}"})
 
         # 7. Canonical matches current URL
-        canonical_href = canonical_tag["href"].rstrip("/")
+        canonical_href = urljoin(url, canonical_tag["href"].strip()).rstrip("/")
         current_normalized = url.rstrip("/")
         if canonical_href == current_normalized:
             checks.append({"name": "Canonical matches current URL", "status": "pass", "detail": "Self-referencing canonical is correct"})

@@ -14,7 +14,6 @@ import uuid
 from datetime import date
 from urllib.parse import urlparse
 
-import requests as req_lib
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
@@ -102,9 +101,21 @@ _jobs: dict      = {}
 _jobs_lock       = threading.Lock()
 
 
+JOB_TTL_SECONDS = 3600
+
+
 def _get_job(job_id: str) -> dict | None:
     with _jobs_lock:
         return _jobs.get(job_id)
+
+
+def _purge_old_jobs() -> None:
+    """Forget finished jobs older than JOB_TTL_SECONDS (results are also on disk)."""
+    cutoff = time.time() - JOB_TTL_SECONDS
+    with _jobs_lock:
+        for jid in [j for j, job in _jobs.items()
+                    if job["status"] in ("done", "error") and job.get("created", 0) < cutoff]:
+            del _jobs[jid]
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +147,7 @@ def _run_audit(job_id: str, config: dict) -> None:
         formats     = config.get("report_formats", ["docx"])
 
         import main as seo_main
-        from checks import ALL_CHECKS, MODULE_TITLES, SITE_WIDE_CHECKS
-        import report_generator
-        import report_generator_html
+        from checks import ALL_CHECKS, MODULE_TITLES
 
         all_reports = []
 
@@ -152,13 +161,14 @@ def _run_audit(job_id: str, config: dict) -> None:
             log(f"[CRAWL] Starting — depth={depth}  max_pages={limit}  concurrency={concurrency}")
 
             # crawl_site prints go to stdout → intercepted → routed to log_q
+            crawl_info: dict = {}
             pages = seo_main.crawl_site(
                 start_url=target_url,
-                session=None,
                 depth=depth,
                 max_pages=max_pages,
                 delay=delay,
                 concurrency=concurrency,
+                crawl_info=crawl_info,
             )
 
             if not pages:
@@ -167,103 +177,29 @@ def _run_audit(job_id: str, config: dict) -> None:
 
             log(f"[CRAWL] Done — {len(pages)} page(s) collected")
 
-            # ── Build shared_state ─────────────────────────────────
-            sync_session = req_lib.Session()
-            sync_session.verify = False
-            req_lib.packages.urllib3.disable_warnings()
+            shared_state = seo_main.build_shared_state(
+                target_url, pages, crawl_info, ps_key, keyword)
 
-            parsed = urlparse(target_url)
-            shared_state = {
-                "base_url":           f"{parsed.scheme}://{parsed.netloc}",
-                "session":            sync_session,
-                "all_urls":           [p["url"] for p in pages],
-                "pagespeed_api_key":  ps_key,
-                "keyword":            keyword,
-                "seen_titles":        set(),
-                "seen_h1s":           set(),
-                "seen_canonicals":    {},
-                "content_hashes":     {},
-                "sitemap_urls":       [],
-                "robots_txt_content": "",
-            }
+            # ── Run checks (shared engine; log format is parsed by static/js/app.js)
+            n_mods = len([n for n, _ in ALL_CHECKS if not selected or n in selected])
+            log(f"[CHECKS] Running {n_mods} module(s) across {len(pages)} page(s)...")
 
-            # ── Filter checks ──────────────────────────────────────
-            checks_to_run = ALL_CHECKS
-            if selected:
-                checks_to_run = [(n, fn) for n, fn in ALL_CHECKS if n in selected]
+            def on_start(idx, total, mod_name, scope):
+                log(f"[{idx:>2}/{total}] {MODULE_TITLES.get(mod_name, mod_name)}  ({scope})")
 
-            # ── Run checks ─────────────────────────────────────────
-            all_results: dict = {}
-            first_page  = pages[0]
-            total_mods  = len(checks_to_run)
-            SAMPLED     = {"image_optimization", "external_links", "internal_linking"}
-
-            log(f"[CHECKS] Running {total_mods} module(s) across {len(pages)} page(s)...")
-
-            for idx, (mod_name, check_fn) in enumerate(checks_to_run, 1):
-                scope = "site-wide" if mod_name in SITE_WIDE_CHECKS else f"{len(pages)} page(s)"
-                title = MODULE_TITLES.get(mod_name, mod_name)
-                log(f"[{idx:>2}/{total_mods}] {title}  ({scope})")
-
-                t0 = time.time()
-
-                if mod_name in SITE_WIDE_CHECKS:
-                    try:
-                        res = check_fn(
-                            url=first_page["url"],
-                            soup=first_page["soup"],
-                            response=first_page["response"],
-                            **shared_state,
-                        )
-                    except Exception as exc:
-                        res = {
-                            "checks":  [{"name": "Module error", "status": "warning",
-                                         "detail": str(exc)}],
-                            "summary": f"Module failed: {exc}",
-                        }
-                    for c in res.get("checks", []):
-                        c.setdefault("page", first_page["url"])
-                    all_results[mod_name] = res
-
-                else:
-                    page_list = pages[:10] if mod_name in SAMPLED else pages
-                    merged: list = []
-                    for page in page_list:
-                        try:
-                            res = check_fn(
-                                url=page["url"],
-                                soup=page["soup"],
-                                response=page["response"],
-                                **shared_state,
-                            )
-                            for c in res.get("checks", []):
-                                c.setdefault("page", page["url"])
-                            merged.extend(res.get("checks", []))
-                        except Exception as exc:
-                            merged.append({
-                                "name": "Module error", "status": "warning",
-                                "detail": str(exc), "page": page["url"],
-                            })
-
-                    p = sum(1 for c in merged if c["status"] == "pass")
-                    f = sum(1 for c in merged if c["status"] == "fail")
-                    w = sum(1 for c in merged if c["status"] == "warning")
-                    all_results[mod_name] = {
-                        "checks":  merged,
-                        "summary": (f"{p} passed, {f} failed, {w} warnings "
-                                    f"across {len(page_list)} page(s)."),
-                    }
-
-                elapsed = time.time() - t0
-                chks    = all_results[mod_name].get("checks", [])
-                n_pass  = sum(1 for c in chks if c["status"] == "pass")
-                n_fail  = sum(1 for c in chks if c["status"] == "fail")
-                n_warn  = sum(1 for c in chks if c["status"] == "warning")
+            def on_done(idx, total, mod_name, res, elapsed):
+                chks = res.get("checks", [])
+                n_pass = sum(1 for c in chks if c["status"] == "pass")
+                n_fail = sum(1 for c in chks if c["status"] == "fail")
+                n_warn = sum(1 for c in chks if c["status"] == "warning")
                 log(f"       ✓ {len(chks)} checks | {n_pass} pass | {n_fail} fail | {n_warn} warn | {elapsed:.1f}s")
+
+            all_results = seo_main.run_all_checks(pages, shared_state, selected=selected,
+                                                  on_start=on_start, on_done=on_done)
 
             # ── Score ──────────────────────────────────────────────
             score = seo_main.compute_score(all_results)
-            log(f"")
+            log("")
             log(f"[SCORE] {score['score_pct']}/100  —  "
                 f"passed: {score['passed']}  |  "
                 f"failed: {score['failed']}  |  "
@@ -272,7 +208,7 @@ def _run_audit(job_id: str, config: dict) -> None:
 
             # ── Generate reports ───────────────────────────────────
             os.makedirs("reports", exist_ok=True)
-            domain    = parsed.netloc.replace("www.", "").replace(":", "_")
+            domain    = urlparse(target_url).netloc.replace("www.", "").replace(":", "_")
             base_name = f"{domain}_{date.today()}"
 
             metadata = {
@@ -284,25 +220,11 @@ def _run_audit(job_id: str, config: dict) -> None:
                 "keyword":       keyword or "",
             }
 
-            gen_files: dict = {}
-
-            if "docx" in formats:
-                path = os.path.join("reports", base_name + ".docx")
-                log("")
-                log("[REPORT] Generating DOCX report ...")
-                path = report_generator.generate_report(all_results, score, metadata, path)
-                log(f"[REPORT] DOCX saved → {os.path.abspath(path)}")
-                gen_files["docx"] = os.path.abspath(path)
-
-            if "html" in formats:
-                path = os.path.join("reports", base_name + ".html")
-                if "docx" not in formats:
-                    log("")
-                log("[REPORT] Generating HTML report ...")
-                path = report_generator_html.generate_html_report(
-                    all_results, score, metadata, path)
-                log(f"[REPORT] HTML saved → {os.path.abspath(path)}")
-                gen_files["html"] = os.path.abspath(path)
+            log("")
+            log("[REPORT] Generating reports ...")
+            gen_files = seo_main.write_reports(
+                all_results, score, metadata, os.path.join("reports", base_name),
+                [f for f in formats if f in seo_main.REPORT_FORMATS], log=log)
 
             # Compact module summary for UI rendering
             modules_summary: dict = {}
@@ -380,8 +302,10 @@ def start_audit():
     if not urls:
         return jsonify({"error": "No URLs provided"}), 400
 
+    _purge_old_jobs()
     job_id = str(uuid.uuid4())
     job = {
+        "created":   time.time(),
         "status":    "queued",
         "log_queue": queue.Queue(),
         "result":    None,
@@ -491,8 +415,10 @@ if __name__ == "__main__":
     import webbrowser
     print("\n" + "=" * 60)
     print("  SEO Audit Tool — Web GUI")
-    print("  http://localhost:5000")
+    host = os.getenv("SEO_GUI_HOST", "127.0.0.1")   # set to 0.0.0.0 to expose on your LAN
+    port = int(os.getenv("SEO_GUI_PORT", "5000"))
+    print(f"  http://localhost:{port}")
     print("  (CLI mode: python main.py --url <url>)")
     print("=" * 60 + "\n")
-    webbrowser.open("http://localhost:5000")
-    app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
+    webbrowser.open(f"http://localhost:{port}")
+    app.run(debug=False, host=host, port=port, threaded=True)

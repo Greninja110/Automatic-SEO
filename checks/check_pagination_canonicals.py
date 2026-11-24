@@ -1,6 +1,6 @@
 """Module 15: Pagination & Canonicals"""
 import re
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs, urljoin, urlunparse
 
 
 def check_pagination_canonicals(url: str, soup, response,
@@ -38,7 +38,7 @@ def check_pagination_canonicals(url: str, soup, response,
 
     # 2. First page canonical points to base URL (not ?page=1)
     canonical = soup.find("link", rel="canonical")
-    canonical_href = canonical.get("href", "") if canonical else ""
+    canonical_href = urljoin(url, canonical.get("href", "").strip()) if canonical and canonical.get("href") else ""
 
     if is_paginated and page_num == 1 and page_param:
         # page=1 should canonicalize to the base URL
@@ -145,7 +145,6 @@ def check_pagination_canonicals(url: str, soup, response,
 
     # 9. No duplicate canonicals across pages
     if all_urls and canonical_href:
-        from collections import defaultdict
         # Count how many pages have seen this canonical (only available if shared dict passed)
         seen_canonicals = kwargs.get("seen_canonicals", {})
         if canonical_href in seen_canonicals and seen_canonicals[canonical_href] != url:

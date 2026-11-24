@@ -18,7 +18,7 @@ def check_technical_seo(url: str, soup, response, session=None, **kwargs) -> dic
 
     # 2. Canonical is self-referencing
     if canonical and canonical.get("href"):
-        canon = canonical["href"].rstrip("/")
+        canon = urljoin(url, canonical["href"].strip()).rstrip("/")
         curr = url.rstrip("/")
         if canon == curr:
             checks.append({"name": "Canonical self-referencing", "status": "pass",
@@ -60,7 +60,7 @@ def check_technical_seo(url: str, soup, response, session=None, **kwargs) -> dic
         amp_ok = False
         if session:
             try:
-                r = session.head(amp_url, timeout=8)
+                r = session.head(amp_url, timeout=8, allow_redirects=True)
                 amp_ok = r.status_code < 400
             except Exception:
                 pass

@@ -7,26 +7,33 @@ from urllib.parse import urlparse
 import certifi
 
 
-def _get_ssl_expiry(hostname: str) -> tuple:
-    """Returns (expiry_date, days_remaining) or (None, None) on error."""
+def _tls_check(hostname: str, port: int = 443) -> dict:
+    """Verified TLS handshake. Returns {"valid": bool|None, "error": str, "expiry": dt, "days": int}.
+
+    valid=False  → certificate rejected (expired, wrong host, untrusted chain)
+    valid=None   → could not connect at all (not a certificate problem)
+    """
+    ctx = ssl.create_default_context(cafile=certifi.where())
     try:
-        ctx = ssl.create_default_context(cafile=certifi.where())
-        with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
-            s.settimeout(10)
-            s.connect((hostname, 443))
-            cert = s.getpeercert()
-            expiry_str = cert.get("notAfter", "")
-            expiry_dt = datetime.strptime(expiry_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
-            days = (expiry_dt - datetime.now(timezone.utc)).days
-            return expiry_dt, days
+        with socket.create_connection((hostname, port), timeout=10) as raw:
+            with ctx.wrap_socket(raw, server_hostname=hostname) as s:
+                cert = s.getpeercert()
+        expiry_dt = datetime.strptime(cert.get("notAfter", ""), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        return {"valid": True, "error": "", "expiry": expiry_dt,
+                "days": (expiry_dt - datetime.now(timezone.utc)).days}
+    except ssl.SSLCertVerificationError as e:
+        return {"valid": False, "error": str(e.verify_message or e), "expiry": None, "days": None}
+    except ssl.SSLError as e:
+        return {"valid": False, "error": str(e), "expiry": None, "days": None}
     except Exception as e:
-        return None, None
+        return {"valid": None, "error": str(e), "expiry": None, "days": None}
 
 
 def check_https_security(url: str, soup, response, session=None, **kwargs) -> dict:
     checks = []
     parsed = urlparse(url)
-    hostname = parsed.netloc.split(":")[0]
+    hostname = parsed.hostname or parsed.netloc.split(":")[0]
+    tls = _tls_check(hostname, parsed.port or 443) if url.startswith("https://") else None
 
     # 1. URL uses HTTPS
     if url.startswith("https://"):
@@ -35,14 +42,15 @@ def check_https_security(url: str, soup, response, session=None, **kwargs) -> di
         checks.append({"name": "URL uses HTTPS", "status": "fail", "detail": "Page is served over HTTP — HTTPS required for SEO"})
 
     # 2. SSL certificate valid
-    try:
-        import requests
-        test_r = requests.get(url, verify=certifi.where(), timeout=10)
+    if tls is None:
+        checks.append({"name": "SSL certificate valid", "status": "fail", "detail": "Site is not served over HTTPS"})
+    elif tls["valid"]:
         checks.append({"name": "SSL certificate valid", "status": "pass", "detail": "SSL certificate is valid and trusted"})
-    except requests.exceptions.SSLError as e:
-        checks.append({"name": "SSL certificate valid", "status": "fail", "detail": f"SSL error: {str(e)[:100]}"})
-    except Exception:
-        checks.append({"name": "SSL certificate valid", "status": "warning", "detail": "Could not verify SSL certificate"})
+    elif tls["valid"] is False:
+        checks.append({"name": "SSL certificate valid", "status": "fail", "detail": f"SSL error: {tls['error'][:100]}"})
+    else:
+        checks.append({"name": "SSL certificate valid", "status": "warning",
+                        "detail": f"Could not verify SSL certificate: {tls['error'][:80]}"})
 
     # 3. HSTS header present
     hsts = response.headers.get("Strict-Transport-Security", "")
@@ -75,7 +83,7 @@ def check_https_security(url: str, soup, response, session=None, **kwargs) -> di
         try:
             http_url = url.replace("https://", "http://", 1)
             r = session.get(http_url, timeout=10, allow_redirects=False)
-            if r.status_code in (301, 302) and "https" in r.headers.get("Location", "").lower():
+            if r.status_code in (301, 302, 307, 308) and r.headers.get("Location", "").lower().startswith("https://"):
                 checks.append({"name": "HTTP redirects to HTTPS", "status": "pass",
                                 "detail": f"HTTP → HTTPS redirect: {r.status_code}"})
             else:
@@ -136,13 +144,13 @@ def check_https_security(url: str, soup, response, session=None, **kwargs) -> di
                         "detail": f"X-Frame-Options: {xfo[:60]}"})
     elif csp:
         checks.append({"name": "X-Frame-Options or CSP present", "status": "pass",
-                        "detail": f"Content-Security-Policy present"})
+                        "detail": "Content-Security-Policy present"})
     else:
         checks.append({"name": "X-Frame-Options or CSP present", "status": "warning",
                         "detail": "No X-Frame-Options or CSP header — clickjacking protection missing"})
 
     # 10. SSL certificate expiry
-    expiry_dt, days_remaining = _get_ssl_expiry(hostname)
+    expiry_dt, days_remaining = (tls["expiry"], tls["days"]) if tls else (None, None)
     if days_remaining is not None:
         if days_remaining > 90:
             checks.append({"name": "SSL certificate expiry (>30 days)", "status": "pass",

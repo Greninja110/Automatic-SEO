@@ -1,12 +1,25 @@
 """Module 18: Error Pages"""
+import re
 import time
 from urllib.parse import urlparse
-import re
+
+from checks._http import head_status, parallel_map
+
+
+def _crawl_statuses(session, all_urls, crawl_statuses, limit=30) -> dict:
+    """Status per crawled URL: reuse the crawler's results, HEAD only what it lacks."""
+    urls = (all_urls or [])[:limit]
+    known = {u: crawl_statuses[u] for u in urls if crawl_statuses.get(u) is not None}
+    missing = [u for u in urls if u not in known]
+    if session and missing:
+        known.update(dict(parallel_map(lambda u: (u, head_status(session, u, timeout=5)[0]), missing)))
+    return known
 
 
 def check_error_pages(url: str, soup, response, session=None,
-                       all_urls: list = None, **kwargs) -> dict:
+                       all_urls: list = None, crawl_statuses: dict = None, **kwargs) -> dict:
     checks = []
+    statuses = _crawl_statuses(session, all_urls, crawl_statuses or {})
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     ghost_path = "/this-page-definitely-does-not-exist-seo-test-abc123xyz"
@@ -96,15 +109,7 @@ def check_error_pages(url: str, soup, response, session=None,
                         "detail": "404 page not accessible for search check"})
 
     # 6. 410 Gone pages (informational from crawl)
-    gone_pages = []
-    if all_urls and session:
-        for check_url in all_urls[:20]:
-            try:
-                r = session.head(check_url, timeout=5)
-                if r.status_code == 410:
-                    gone_pages.append(check_url)
-            except Exception:
-                pass
+    gone_pages = [u for u, s in statuses.items() if s == 410]
     if gone_pages:
         checks.append({"name": "410 Gone pages (informational)", "status": "warning",
                         "detail": f"410 Gone pages found: {gone_pages[:3]}"})
@@ -117,15 +122,7 @@ def check_error_pages(url: str, soup, response, session=None,
                     "detail": "Cannot trigger 500 errors safely — manually verify that server errors show a branded page"})
 
     # 8. No 5xx pages in crawl
-    five_xx_pages = []
-    if all_urls and session:
-        for check_url in (all_urls or [])[:30]:
-            try:
-                r = session.head(check_url, timeout=5, allow_redirects=True)
-                if r.status_code >= 500:
-                    five_xx_pages.append(f"{check_url} (HTTP {r.status_code})")
-            except Exception:
-                pass
+    five_xx_pages = [f"{u} (HTTP {s})" for u, s in statuses.items() if s and s >= 500]
     if five_xx_pages:
         checks.append({"name": "No 5xx server errors in crawl", "status": "fail",
                         "detail": f"5xx errors found: {five_xx_pages[:3]}"})

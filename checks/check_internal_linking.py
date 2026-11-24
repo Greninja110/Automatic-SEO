@@ -1,6 +1,7 @@
 """Module 6: Internal Linking"""
 from urllib.parse import urlparse, urljoin
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from checks._http import head_status, parallel_map
 
 
 GENERIC_ANCHORS = {"click here", "read more", "here", "link", "more", "learn more", "this", "page", "website"}
@@ -43,22 +44,19 @@ def check_internal_linking(url: str, soup, response, base_url: str = None, sessi
     broken_404 = []
     broken_other = []
     if session and internal_links:
-        def check_link(item):
-            link_url, _ = item
-            try:
-                r = session.head(link_url, timeout=5, allow_redirects=True)
-                return link_url, r.status_code
-            except Exception:
-                return link_url, None
+        crawl_statuses = kwargs.get("crawl_statuses") or {}
+        sample = list(dict.fromkeys(lnk.split("#")[0] for lnk, _ in internal_links))[:10]
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(check_link, lnk): lnk for lnk in internal_links[:10]}
-            for future in as_completed(futures):
-                lnk_url, status = future.result()
-                if status == 404:
-                    broken_404.append(lnk_url[:80])
-                elif status and status >= 400:
-                    broken_other.append(f"{lnk_url[:60]} ({status})")
+        def _status(link_url):
+            if link_url in crawl_statuses and crawl_statuses[link_url] is not None:
+                return link_url, crawl_statuses[link_url]   # already fetched by the crawler
+            return link_url, head_status(session, link_url, timeout=5)[0]
+
+        for lnk_url, status in parallel_map(_status, sample):
+            if status == 404:
+                broken_404.append(lnk_url[:80])
+            elif status and status >= 400:
+                broken_other.append(f"{lnk_url[:60]} ({status})")
 
     if broken_404:
         checks.append({"name": "No broken internal links (404)", "status": "fail", "detail": f"404 links: {broken_404[:3]}"})

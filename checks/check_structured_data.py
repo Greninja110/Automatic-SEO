@@ -7,8 +7,42 @@ KNOWN_TYPES = {
     "Organization", "WebSite", "Article", "NewsArticle", "BlogPosting",
     "Product", "BreadcrumbList", "LocalBusiness", "Event", "FAQPage",
     "HowTo", "Recipe", "Review", "Person", "WebPage", "ItemList",
-    "VideoObject", "ImageObject", "SoftwareApplication", "Service"
+    "VideoObject", "ImageObject", "SoftwareApplication", "Service",
+    # common types exposed by @graph (Yoast, Rank Math, etc.)
+    "AboutPage", "ContactPage", "CollectionPage", "ProfilePage", "SearchResultsPage",
+    "QAPage", "Question", "Answer", "ListItem", "SearchAction", "ReadAction", "EntryPoint",
+    "Offer", "AggregateRating", "AggregateOffer", "Brand", "PostalAddress", "ContactPoint",
+    "Corporation", "EducationalOrganization", "NGO", "Store", "Restaurant", "Course",
+    "JobPosting", "Dataset", "SiteNavigationElement", "WPHeader", "WPFooter", "MobileApplication",
+    "WebApplication", "Thing", "CreativeWork", "Blog", "Book", "Movie", "MusicRecording",
 }
+
+
+def _flatten_schemas(data) -> list:
+    """All JSON-LD objects: expands top-level lists and @graph containers."""
+    out, stack = [], [data]
+    while stack:
+        node = stack.pop(0)
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            if "@graph" in node and not node.get("@type"):
+                graph = node["@graph"]
+                ctx = node.get("@context")
+                for g in (graph if isinstance(graph, list) else [graph]):
+                    if isinstance(g, dict) and ctx and "@context" not in g:
+                        g = {**g, "@context": ctx}
+                    stack.append(g)
+            else:
+                out.append(node)
+    return out
+
+
+def _type_list(schema) -> list:
+    t = schema.get("@type")
+    if not t:
+        return []
+    return [str(x) for x in t] if isinstance(t, list) else [str(t)]
 
 
 def check_structured_data(url: str, soup, response, **kwargs) -> dict:
@@ -29,12 +63,8 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     for i, script in enumerate(ld_scripts):
         try:
             text = script.string or script.get_text()
-            data = json.loads(text)
-            if isinstance(data, list):
-                parsed_schemas.extend(data)
-            else:
-                parsed_schemas.append(data)
-        except json.JSONDecodeError as e:
+            parsed_schemas.extend(_flatten_schemas(json.loads(text)))
+        except (json.JSONDecodeError, TypeError) as e:
             parse_errors.append(f"Block {i+1}: {str(e)[:60]}")
 
     if ld_scripts:
@@ -56,7 +86,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     if parsed_schemas:
         missing_type = [i for i, s in enumerate(parsed_schemas) if not s.get("@type")]
         if not missing_type:
-            types = [s.get("@type") for s in parsed_schemas]
+            types = [t for s in parsed_schemas for t in _type_list(s)]
             checks.append({"name": "@type present in all schemas", "status": "pass", "detail": f"Types found: {types[:5]}"})
         else:
             checks.append({"name": "@type present in all schemas", "status": "fail",
@@ -64,7 +94,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
 
     # 5. Valid known @type
     if parsed_schemas:
-        types_found = [s.get("@type") for s in parsed_schemas if s.get("@type")]
+        types_found = [t for s in parsed_schemas for t in _type_list(s)]
         unknown = [t for t in types_found if t not in KNOWN_TYPES]
         if not unknown:
             checks.append({"name": "Valid schema @type used", "status": "pass", "detail": f"Recognized types: {types_found[:5]}"})
@@ -88,7 +118,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     og_title = soup.find("meta", property="og:title")
     og_title_text = og_title.get("content", "") if og_title else ""
     if parsed_schemas and og_title_text:
-        ld_names = [s.get("name") or s.get("headline") or "" for s in parsed_schemas]
+        ld_names = [str(s.get("name") or s.get("headline") or "") for s in parsed_schemas]
         consistent = any(og_title_text[:30].lower() in n.lower() or n[:30].lower() in og_title_text.lower()
                          for n in ld_names if n)
         if consistent:
@@ -103,7 +133,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     # 8. BreadcrumbList for multi-level URLs
     path = urlparse(url).path
     depth = len([s for s in path.strip("/").split("/") if s])
-    has_breadcrumb = any(s.get("@type") == "BreadcrumbList" for s in parsed_schemas)
+    has_breadcrumb = any("BreadcrumbList" in _type_list(s) for s in parsed_schemas)
     if depth > 1:
         if has_breadcrumb:
             checks.append({"name": "BreadcrumbList schema (multi-level URLs)", "status": "pass",
@@ -118,7 +148,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     # 9. No duplicate @type declarations
     if parsed_schemas:
         from collections import Counter
-        type_counts = Counter(s.get("@type") for s in parsed_schemas if s.get("@type"))
+        type_counts = Counter(t for s in parsed_schemas for t in _type_list(s))
         dups = {t: c for t, c in type_counts.items() if c > 1}
         if not dups:
             checks.append({"name": "No duplicate @type declarations", "status": "pass", "detail": "Each @type appears once"})
@@ -129,7 +159,8 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
         checks.append({"name": "No duplicate @type declarations", "status": "warning", "detail": "No schemas to check"})
 
     # 10. Article schema has required fields
-    article_schemas = [s for s in parsed_schemas if s.get("@type") in ("Article", "NewsArticle", "BlogPosting")]
+    article_schemas = [s for s in parsed_schemas
+                       if set(_type_list(s)) & {"Article", "NewsArticle", "BlogPosting"}]
     if article_schemas:
         missing_fields = []
         for s in article_schemas:
@@ -149,7 +180,7 @@ def check_structured_data(url: str, soup, response, **kwargs) -> dict:
     passed = sum(1 for c in checks if c["status"] == "pass")
     failed = sum(1 for c in checks if c["status"] == "fail")
     warned = sum(1 for c in checks if c["status"] == "warning")
-    types_str = str([s.get("@type") for s in parsed_schemas[:3]]) if parsed_schemas else "none"
+    types_str = str([t for s in parsed_schemas[:3] for t in _type_list(s)]) if parsed_schemas else "none"
     summary = f"{passed} passed, {failed} failed, {warned} warnings. Schema types: {types_str}"
 
     return {"checks": checks, "summary": summary}

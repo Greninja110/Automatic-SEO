@@ -18,12 +18,12 @@ def check_meta_tags(url: str, soup, response, seen_titles: set = None, seen_desc
 
     # 2. Title length
     title_len = len(title_text)
-    if 1 <= title_len <= 60:
+    if title_len == 0:
+        checks.append({"name": "Title length (≤60 chars)", "status": "fail", "detail": "Title is empty"})
+    elif title_len <= 60:
         checks.append({"name": "Title length (≤60 chars)", "status": "pass", "detail": f"Title length: {title_len} characters"})
     elif title_len <= 70:
         checks.append({"name": "Title length (≤60 chars)", "status": "warning", "detail": f"Title slightly long: {title_len} chars (ideal ≤60)"})
-    elif title_len == 0:
-        checks.append({"name": "Title length (≤60 chars)", "status": "fail", "detail": "Title is empty"})
     else:
         checks.append({"name": "Title length (≤60 chars)", "status": "fail", "detail": f"Title too long: {title_len} chars (max 60)"})
 
@@ -45,12 +45,12 @@ def check_meta_tags(url: str, soup, response, seen_titles: set = None, seen_desc
 
     # 5. Meta description length
     desc_len = len(desc_text)
-    if 1 <= desc_len <= 160:
+    if desc_len == 0:
+        checks.append({"name": "Meta description length (≤160 chars)", "status": "fail", "detail": "Description is empty"})
+    elif desc_len <= 160:
         checks.append({"name": "Meta description length (≤160 chars)", "status": "pass", "detail": f"Description length: {desc_len} characters"})
     elif desc_len <= 200:
         checks.append({"name": "Meta description length (≤160 chars)", "status": "warning", "detail": f"Description slightly long: {desc_len} chars (ideal ≤160)"})
-    elif desc_len == 0:
-        checks.append({"name": "Meta description length (≤160 chars)", "status": "fail", "detail": "Description is empty"})
     else:
         checks.append({"name": "Meta description length (≤160 chars)", "status": "fail", "detail": f"Description too long: {desc_len} chars"})
 

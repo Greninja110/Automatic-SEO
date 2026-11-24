@@ -2,17 +2,20 @@
 SEO Audit Tool — Main Controller
 
 Input priority:
-  1. target_website variable below  — set this for quick single-site testing
-  2. targets.txt file               — one URL per line; prefix with # to skip
-  3. --url CLI argument             — overrides everything when passed
+  1. --url CLI argument             — overrides everything when passed
+  2. target_website variable below  — set this for quick single-site testing
+  3. targets.txt file               — one URL per line; prefix with # to skip
 
 Usage examples:
   python main.py                          # uses target_website or targets.txt
   python main.py --url https://site.com  # one-off override via CLI
+  python main.py --url site.com --format json --max-pages 20
+  python main.py --url site.com --backlinks-json backlinks.json
 """
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
@@ -20,9 +23,9 @@ from datetime import date
 from urllib.parse import urlparse, urljoin
 
 import aiohttp
-import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from requests.structures import CaseInsensitiveDict
 
 load_dotenv()
 
@@ -32,7 +35,7 @@ load_dotenv()
 
 # Set a single URL here to test just one site without editing targets.txt.
 # Leave as empty string "" to use targets.txt instead.
-target_website = "https://www.anthropic.com/"
+target_website = "https://openai.com/"
 
 # Primary SEO keyword for density and heading checks.
 # Leave as empty string "" if you don't want keyword analysis.
@@ -42,6 +45,12 @@ target_keyword = ""
 # Path to the targets file (one URL per line, # prefix = skip that line)
 TARGET_FILE = "targets.txt"
 
+REPORT_FORMATS = ("docx", "html", "json")
+
+# Modules that make many network requests: run on the first N pages only.
+SAMPLED_MODULES = {"image_optimization", "external_links", "internal_linking"}
+SAMPLE_SIZE = 10
+
 # ===========================================================================
 
 
@@ -49,16 +58,32 @@ TARGET_FILE = "targets.txt"
 # CLI (optional — overrides the variables above when --url is passed)
 # ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SEO Audit Tool")
     parser.add_argument("--url",       default=None,        help="Single URL override (ignores target_website and targets.txt)")
     parser.add_argument("--depth",     type=int, default=1, help="Crawl depth (default 1)")
-    parser.add_argument("--keyword",   default=None,        help="Target keyword for density check")
-    parser.add_argument("--output",    default=None,        help="Output filename prefix (without .docx) — only used with --url")
+    parser.add_argument("--keyword",   default=None,        help="Target keyword or phrase for density check")
+    parser.add_argument("--output",    default=None,        help="Output filename prefix (no extension) — only used with --url")
+    parser.add_argument("--output-dir", default="reports",  help="Folder for generated reports (default: reports)")
     parser.add_argument("--delay",     type=float, default=0.3, help="Delay between requests in seconds")
     parser.add_argument("--max-pages", type=int, default=0,     help="Max pages to crawl per site (0 = unlimited)")
     parser.add_argument("--concurrency", type=int, default=10,  help="Max concurrent async fetch connections (default 10)")
-    return parser.parse_args()
+    parser.add_argument("--format",    default="docx,html",
+                        help="Comma-separated report formats: docx, html, json (default: docx,html)")
+    parser.add_argument("--json",      action="store_true", help="Also write a machine-readable JSON report")
+    parser.add_argument("--backlinks-json", default=None,
+                        help="Path to a JSON file with live backlink data (e.g. from Agensi's "
+                             "backlink summary tool) used by the Backlinks (Live Data) module")
+    args = parser.parse_args(argv)
+
+    formats = [f.strip().lower() for f in args.format.split(",") if f.strip()]
+    if args.json and "json" not in formats:
+        formats.append("json")
+    bad = [f for f in formats if f not in REPORT_FORMATS]
+    if bad or not formats:
+        parser.error(f"--format must be a comma-separated list of {', '.join(REPORT_FORMATS)}")
+    args.formats = formats
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -77,24 +102,21 @@ def load_targets(args: argparse.Namespace) -> list:
     Returns a list of (url, output_name_or_None) tuples to audit.
     Priority: --url CLI  >  target_website variable  >  targets.txt
     """
-    # 1. CLI --url flag
     if args.url:
         url = _normalise_url(args.url)
         print(f"[TARGET] Mode: CLI --url override → {url}")
         return [(url, args.output)]
 
-    # 2. target_website variable
     if target_website.strip():
         url = _normalise_url(target_website.strip())
         print(f"[TARGET] Mode: target_website variable → {url}")
         return [(url, None)]
 
-    # 3. targets.txt
     if not os.path.exists(TARGET_FILE):
-        print(f"[ERROR] No target specified.")
-        print(f"        → Set the 'target_website' variable in main.py, or")
+        print("[ERROR] No target specified.")
+        print("        → Set the 'target_website' variable in main.py, or")
         print(f"        → Create '{TARGET_FILE}' with one URL per line, or")
-        print(f"        → Pass --url https://example.com")
+        print("        → Pass --url https://example.com")
         sys.exit(1)
 
     targets = []
@@ -102,7 +124,7 @@ def load_targets(args: argparse.Namespace) -> list:
         for raw_line in f:
             line = raw_line.strip()
             if not line or line.startswith("#"):
-                continue                      # blank or commented-out
+                continue
             targets.append((_normalise_url(line), None))
 
     if not targets:
@@ -120,41 +142,106 @@ def load_targets(args: argparse.Namespace) -> list:
 # Async Crawler
 # ---------------------------------------------------------------------------
 
+class _Elapsed:
+    """Minimal stand-in for datetime.timedelta used by check modules."""
+    def __init__(self, seconds: float):
+        self._s = seconds
+
+    def total_seconds(self) -> float:
+        return self._s
+
+
+class _HistoryStub:
+    """One redirect hop (mirrors the parts of requests.Response checks use)."""
+    def __init__(self, status: int, url: str):
+        self.status_code = status
+        self.url = url
+        self.elapsed = _Elapsed(0.0)
+
+
+class ResponseStub:
+    """requests.Response-compatible view of an aiohttp fetch.
+
+    Check modules use .status_code, .headers, .url, .text, .content,
+    .elapsed and .history.
+    """
+    def __init__(self, status, headers, final_url, text, elapsed, history):
+        self.status_code = status or 200
+        self.headers     = headers
+        self.url         = final_url
+        self.text        = text
+        self.content     = text.encode("utf-8", errors="replace")
+        self.elapsed     = _Elapsed(elapsed)
+        self.history     = history
+
+
+def _merge_headers(raw_headers) -> CaseInsensitiveDict:
+    """Case-insensitive headers; repeated headers (e.g. Set-Cookie) are joined."""
+    merged = CaseInsensitiveDict()
+    for k, v in raw_headers.items():
+        merged[k] = f"{merged[k]}, {v}" if k in merged else v
+    return merged
+
+
 async def _fetch_async(url: str, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
-    """Fetch a single URL asynchronously. Returns (url, text, status) or (url, None, None)."""
+    """Fetch one URL. Returns a dict with status, headers, text (HTML only), timing and redirects."""
     async with semaphore:
+        start = time.perf_counter()
         try:
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; SEOAuditBot/1.0; "
-                    "+https://github.com/seo-audit-tool)"
-                )
-            }
-            async with session.get(url, headers=headers, allow_redirects=True,
+            async with session.get(url, allow_redirects=True,
                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 content_type = resp.headers.get("Content-Type", "")
-                if "text/html" in content_type:
-                    text = await resp.text(errors="replace")
-                    return url, text, resp.status, dict(resp.headers), str(resp.url)
-                return url, None, resp.status, dict(resp.headers), str(resp.url)
+                text = await resp.text(errors="replace") if "text/html" in content_type else None
+                return {
+                    "status":  resp.status,
+                    "headers": _merge_headers(resp.headers),
+                    "final":   str(resp.url),
+                    "text":    text,
+                    "elapsed": time.perf_counter() - start,
+                    "history": [_HistoryStub(h.status, str(h.url)) for h in resp.history],
+                }
         except Exception as e:
             print(f"  [WARN] Could not fetch {url}: {e}")
-            return url, None, None, {}, url
+            return {"status": None, "headers": CaseInsensitiveDict(), "final": url,
+                    "text": None, "elapsed": time.perf_counter() - start, "history": []}
+
+
+def _extract_internal_links(soup, page_url: str, base_domain: str) -> list:
+    """Internal links in document order, de-duplicated (order keeps --max-pages deterministic)."""
+    links = {}
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        full_url = urljoin(page_url, href).split("#")[0].split("?")[0]
+        parsed = urlparse(full_url)
+        if parsed.scheme in ("http", "https") and parsed.netloc.replace("www.", "") == base_domain:
+            links.setdefault(full_url, None)
+    return list(links)
 
 
 async def crawl_site_async(start_url: str, depth: int = 1,
                            max_pages: int = 0, delay: float = 0.3,
-                           concurrency: int = 10) -> list:
+                           concurrency: int = 10, crawl_info: dict | None = None) -> list:
     """
     Async BFS crawl of same-domain pages up to `depth` levels.
     max_pages=0 means unlimited.
-    Returns list of {"url", "response_stub", "soup"} dicts compatible with sync code.
+
+    Returns a list of {"url", "response", "soup"} dicts. When `crawl_info` is
+    given it is filled with:
+      statuses     {url: HTTP status or None}  for every URL fetched
+      times        {url: seconds}
+      linked_urls  set of every internal URL linked from any crawled page
     """
     parsed_start = urlparse(start_url)
     base_domain = parsed_start.netloc.replace("www.", "")
 
+    info = crawl_info if crawl_info is not None else {}
+    info.setdefault("statuses", {})
+    info.setdefault("times", {})
+    info.setdefault("linked_urls", set())
+
     visited = set()
-    # queue items: (url, depth_level)
     current_level = [(start_url, 0)]
     pages = []
 
@@ -162,14 +249,12 @@ async def crawl_site_async(start_url: str, depth: int = 1,
     print(f"\n[CRAWL] Starting async crawl of {start_url} "
           f"(depth={depth}, {limit_str}, concurrency={concurrency})")
 
-    ssl_context = False  # skip SSL verification (same as sync version)
-
-    connector = aiohttp.TCPConnector(ssl=ssl_context, limit=concurrency)
+    connector = aiohttp.TCPConnector(ssl=False, limit=concurrency)  # audit sites with broken TLS too
     semaphore = asyncio.Semaphore(concurrency)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SEOAuditBot/2.0; +https://github.com/seo-audit-tool)"}
 
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         while current_level:
-            # Filter out already-visited
             to_fetch = []
             for url, d in current_level:
                 norm = url.rstrip("/")
@@ -180,7 +265,6 @@ async def crawl_site_async(start_url: str, depth: int = 1,
             if not to_fetch:
                 break
 
-            # Respect max_pages cap
             if max_pages > 0:
                 remaining = max_pages - len(pages)
                 if remaining <= 0:
@@ -188,58 +272,35 @@ async def crawl_site_async(start_url: str, depth: int = 1,
                 to_fetch = to_fetch[:remaining]
 
             print(f"  [CRAWL] Fetching {len(to_fetch)} URL(s) at depth "
-                  f"{to_fetch[0][1] if to_fetch else '?'} "
-                  f"(total so far: {len(pages)}) ...")
+                  f"{to_fetch[0][1]} (total so far: {len(pages)}) ...")
 
-            tasks = [_fetch_async(url, session, semaphore) for url, _ in to_fetch]
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*[_fetch_async(u, session, semaphore) for u, _ in to_fetch])
 
             next_level = []
-            for (orig_url, orig_depth), (fetched_url, text, status, headers, final_url) in zip(to_fetch, results):
-                if text is None:
+            for (orig_url, orig_depth), res in zip(to_fetch, results):
+                info["statuses"][orig_url] = res["status"]
+                info["times"][orig_url] = res["elapsed"]
+                if res["text"] is None:
                     continue
 
-                soup = BeautifulSoup(text, "lxml")
-
-                # Build a lightweight response stub so check modules keep working
-                # (they expect .status_code, .headers, .url, .text, .elapsed)
-                class _ResponseStub:
-                    def __init__(self):
-                        self.status_code = status or 200
-                        self.headers     = headers
-                        self.url         = final_url
-                        self.text        = text
-                        self.content     = text.encode("utf-8", errors="replace")
-                        # Provide a minimal elapsed timedelta-like object
-                        class _Elapsed:
-                            total_seconds = lambda self: 0.0
-                        self.elapsed = _Elapsed()
-
+                soup = BeautifulSoup(res["text"], "lxml")
                 pages.append({
                     "url":      orig_url,
-                    "response": _ResponseStub(),
+                    "response": ResponseStub(res["status"], res["headers"], res["final"],
+                                             res["text"], res["elapsed"], res["history"]),
                     "soup":     soup,
                 })
 
-                # Discover links for next depth level
+                links = _extract_internal_links(soup, orig_url, base_domain)
+                info["linked_urls"].update(links)
                 if orig_depth < depth:
-                    for a in soup.find_all("a", href=True):
-                        href = a.get("href", "").strip()
-                        if not href or href.startswith("#") or href.startswith("mailto:") or href.startswith("tel:"):
-                            continue
-                        full_url = urljoin(orig_url, href).split("#")[0].split("?")[0]
-                        parsed = urlparse(full_url)
-                        if (parsed.scheme in ("http", "https") and
-                                parsed.netloc.replace("www.", "") == base_domain and
-                                full_url.rstrip("/") not in visited):
-                            next_level.append((full_url, orig_depth + 1))
+                    next_level.extend((u, orig_depth + 1) for u in links
+                                      if u.rstrip("/") not in visited)
 
-                if delay > 0:
-                    await asyncio.sleep(delay)
+            if delay > 0:
+                await asyncio.sleep(delay)   # politeness pause between crawl levels
 
             current_level = next_level
-
-            # Stop if we've hit the cap
             if max_pages > 0 and len(pages) >= max_pages:
                 break
 
@@ -247,112 +308,127 @@ async def crawl_site_async(start_url: str, depth: int = 1,
     return pages
 
 
-def crawl_site(start_url: str, session: requests.Session,
-               depth: int = 1, max_pages: int = 0, delay: float = 0.3,
-               concurrency: int = 10) -> list:
-    """Sync wrapper around the async crawler."""
+def crawl_site(start_url: str, session=None, depth: int = 1, max_pages: int = 0,
+               delay: float = 0.3, concurrency: int = 10, crawl_info: dict | None = None) -> list:
+    """Sync wrapper around the async crawler (`session` is unused, kept for compatibility)."""
     return asyncio.run(crawl_site_async(start_url, depth=depth, max_pages=max_pages,
-                                        delay=delay, concurrency=concurrency))
+                                        delay=delay, concurrency=concurrency,
+                                        crawl_info=crawl_info))
 
 
 # ---------------------------------------------------------------------------
-# Sync fallback fetcher (used by check modules that still use requests.Session)
+# Shared state + check runner (used by both CLI and the web GUI)
 # ---------------------------------------------------------------------------
 
-def fetch_page(url: str, session: requests.Session, timeout: int = 15):
-    """Fetch a single URL. Returns (response, soup) or (None, None)."""
+def load_backlinks_file(path: str | None) -> dict | None:
+    if not path:
+        return None
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (compatible; SEOAuditBot/1.0; "
-                "+https://github.com/seo-audit-tool)"
-            )
-        }
-        r = session.get(url, timeout=timeout, headers=headers, allow_redirects=True)
-        if "text/html" in r.headers.get("Content-Type", ""):
-            soup = BeautifulSoup(r.text, "lxml")
-            return r, soup
-        return r, None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        print(f"  [WARN] Could not fetch {url}: {e}")
-        return None, None
+        print(f"[WARN] Could not read --backlinks-json {path}: {e}")
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Check Runner
-# ---------------------------------------------------------------------------
+def build_shared_state(target_url: str, pages: list, crawl_info: dict,
+                       pagespeed_key: str = "", keyword: str | None = None,
+                       backlinks_data: dict | None = None) -> dict:
+    from checks._http import make_session
+    parsed = urlparse(target_url)
+    return {
+        "base_url":           f"{parsed.scheme}://{parsed.netloc}",
+        "session":            make_session(),
+        "all_urls":           [p["url"] for p in pages],
+        "pagespeed_api_key":  pagespeed_key,
+        "keyword":            keyword,
+        "seen_titles":        set(),
+        "seen_h1s":           set(),
+        "seen_canonicals":    {},
+        "content_hashes":     {},
+        "sitemap_urls":       [],
+        "robots_txt_content": "",
+        "crawl_statuses":     crawl_info.get("statuses", {}),
+        "crawl_times":        crawl_info.get("times", {}),
+        "linked_urls":        crawl_info.get("linked_urls", set()),
+        "backlinks_data":     backlinks_data,
+    }
 
-def run_all_checks(pages: list, shared_state: dict) -> dict:
-    """Run all 23 SEO check modules across crawled pages."""
+
+def _count(checks: list) -> tuple:
+    p = sum(1 for c in checks if c["status"] == "pass")
+    f = sum(1 for c in checks if c["status"] == "fail")
+    w = sum(1 for c in checks if c["status"] == "warning")
+    return p, f, w
+
+
+def _run_module(module_name, check_fn, pages, shared_state, site_wide: bool) -> dict:
+    if site_wide:
+        first_page = pages[0]
+        try:
+            result = check_fn(url=first_page["url"], soup=first_page["soup"],
+                              response=first_page["response"], **shared_state)
+        except Exception as e:
+            result = {"checks": [{"name": "Module error", "status": "warning",
+                                  "detail": f"Error in {module_name}: {e}"}],
+                      "summary": f"Module failed: {e}"}
+        for check in result.get("checks", []):
+            check.setdefault("page", first_page["url"])
+        return result
+
+    page_list = pages[:SAMPLE_SIZE] if module_name in SAMPLED_MODULES else pages
+    merged = []
+    for page in page_list:
+        try:
+            result = check_fn(url=page["url"], soup=page["soup"],
+                              response=page["response"], **shared_state)
+            for check in result.get("checks", []):
+                check.setdefault("page", page["url"])
+            merged.extend(result.get("checks", []))
+        except Exception as e:
+            merged.append({"name": "Module error", "status": "warning",
+                           "detail": f"Error on {page['url']}: {e}", "page": page["url"]})
+
+    p, f, w = _count(merged)
+    sampled = len(page_list)
+    return {"checks": merged,
+            "summary": (f"{p} passed, {f} failed, {w} warnings across {sampled} page(s)"
+                        + (f" (sampled from {len(pages)})" if sampled < len(pages) else "") + ".")}
+
+
+def run_all_checks(pages: list, shared_state: dict, selected: list | None = None,
+                   on_start=None, on_done=None) -> dict:
+    """Run the SEO check modules across crawled pages.
+
+    selected: optional list of module names to run (default: all).
+    on_start(idx, total, module_name, scope) / on_done(idx, total, module_name, result, seconds):
+    optional progress callbacks; default prints CLI progress lines.
+    """
     from checks import ALL_CHECKS, SITE_WIDE_CHECKS
 
+    to_run = [(n, fn) for n, fn in ALL_CHECKS if not selected or n in selected]
+    total = len(to_run)
     all_results = {}
-    first_page  = pages[0] if pages else None
-    total_mods  = len(ALL_CHECKS)
 
-    for idx, (module_name, check_fn) in enumerate(ALL_CHECKS, start=1):
-        scope = "site-wide" if module_name in SITE_WIDE_CHECKS else f"{len(pages)} page(s)"
-        print(f"  [CHECK {idx:>2}/{total_mods}] {module_name} ({scope}) ...", end=" ", flush=True)
-        start = time.time()
-
-        if module_name in SITE_WIDE_CHECKS:
-            try:
-                result = check_fn(
-                    url=first_page["url"],
-                    soup=first_page["soup"],
-                    response=first_page["response"],
-                    **shared_state
-                )
-            except Exception as e:
-                result = {
-                    "checks": [{"name": "Module error", "status": "warning",
-                                 "detail": f"Error in {module_name}: {str(e)}"}],
-                    "summary": f"Module failed: {e}"
-                }
-            for check in result.get("checks", []):
-                check.setdefault("page", first_page["url"] if first_page else "N/A")
-            all_results[module_name] = result
+    for idx, (module_name, check_fn) in enumerate(to_run, start=1):
+        site_wide = module_name in SITE_WIDE_CHECKS
+        scope = "site-wide" if site_wide else f"{len(pages)} page(s)"
+        if on_start:
+            on_start(idx, total, module_name, scope)
         else:
-            # Heavy network modules: sample first 10 pages to avoid very long runtimes
-            SAMPLED_MODULES = {"image_optimization", "external_links", "internal_linking"}
-            page_list = pages[:10] if module_name in SAMPLED_MODULES else pages
+            print(f"  [CHECK {idx:>2}/{total}] {module_name} ({scope}) ...", end=" ", flush=True)
 
-            merged_checks = []
-            for page in page_list:
-                try:
-                    result = check_fn(
-                        url=page["url"],
-                        soup=page["soup"],
-                        response=page["response"],
-                        **shared_state
-                    )
-                    for check in result.get("checks", []):
-                        check.setdefault("page", page["url"])
-                    merged_checks.extend(result.get("checks", []))
-                except Exception as e:
-                    merged_checks.append({
-                        "name": "Module error",
-                        "status": "warning",
-                        "detail": f"Error on {page['url']}: {str(e)}",
-                        "page": page["url"]
-                    })
+        start = time.time()
+        result = _run_module(module_name, check_fn, pages, shared_state, site_wide)
+        all_results[module_name] = result
+        elapsed = time.time() - start
 
-            passed  = sum(1 for c in merged_checks if c["status"] == "pass")
-            failed  = sum(1 for c in merged_checks if c["status"] == "fail")
-            warned  = sum(1 for c in merged_checks if c["status"] == "warning")
-            sampled = len(page_list)
-            all_results[module_name] = {
-                "checks":  merged_checks,
-                "summary": (f"{passed} passed, {failed} failed, {warned} warnings "
-                             f"across {sampled} page(s)"
-                             + (f" (sampled from {len(pages)})" if sampled < len(pages) else "") + ".")
-            }
-
-        elapsed  = time.time() - start
-        n_checks = len(all_results[module_name].get("checks", []))
-        fails    = sum(1 for c in all_results[module_name].get("checks", []) if c["status"] == "fail")
-        warns    = sum(1 for c in all_results[module_name].get("checks", []) if c["status"] == "warning")
-        print(f"done  ({n_checks} checks | {fails} fail | {warns} warn | {elapsed:.1f}s)")
+        if on_done:
+            on_done(idx, total, module_name, result, elapsed)
+        else:
+            checks = result.get("checks", [])
+            _, f, w = _count(checks)
+            print(f"done  ({len(checks)} checks | {f} fail | {w} warn | {elapsed:.1f}s)")
 
     return all_results
 
@@ -363,12 +439,61 @@ def compute_score(all_results: dict) -> dict:
         for check in result.get("checks", []):
             total += 1
             s = check.get("status")
-            if s == "pass":       passed   += 1
-            elif s == "fail":     failed   += 1
-            elif s == "warning":  warnings += 1
+            if s == "pass":
+                passed += 1
+            elif s == "fail":
+                failed += 1
+            elif s == "warning":
+                warnings += 1
     score_pct = round((passed / total * 100) if total > 0 else 0, 1)
     return {"total": total, "passed": passed, "failed": failed,
             "warnings": warnings, "score_pct": score_pct}
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+def generate_json_report(all_results: dict, score: dict, metadata: dict, path: str) -> str:
+    """Machine-readable report: score, metadata and every check grouped by module."""
+    from checks import MODULE_TITLES, SITE_WIDE_CHECKS, __version__
+    modules = {}
+    for name, res in all_results.items():
+        checks = res.get("checks", [])
+        p, f, w = _count(checks)
+        modules[name] = {
+            "title":   MODULE_TITLES.get(name, name),
+            "scope":   "site-wide" if name in SITE_WIDE_CHECKS else "per-page",
+            "summary": res.get("summary", ""),
+            "pass": p, "fail": f, "warning": w, "total": len(checks),
+            "checks":  checks,
+        }
+    payload = {"tool": "automatic-seo-audit", "version": __version__,
+               "metadata": metadata, "score": score, "modules": modules}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False, default=str)
+    return path
+
+
+def write_reports(all_results: dict, score: dict, metadata: dict, base_path: str,
+                  formats, log=print) -> dict:
+    """Write the requested report formats; returns {format: absolute_path}."""
+    files = {}
+    if "docx" in formats:
+        import report_generator
+        p = report_generator.generate_report(all_results, score, metadata, base_path + ".docx")
+        files["docx"] = os.path.abspath(p)
+        log(f"[REPORT] DOCX saved: {files['docx']}")
+    if "html" in formats:
+        import report_generator_html
+        p = report_generator_html.generate_html_report(all_results, score, metadata, base_path + ".html")
+        files["html"] = os.path.abspath(p)
+        log(f"[REPORT] HTML saved: {files['html']}")
+    if "json" in formats:
+        p = generate_json_report(all_results, score, metadata, base_path + ".json")
+        files["json"] = os.path.abspath(p)
+        log(f"[REPORT] JSON saved: {files['json']}")
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +503,8 @@ def compute_score(all_results: dict) -> dict:
 def audit_one(target_url: str, output_hint: str | None,
               args: argparse.Namespace, pagespeed_key: str,
               site_index: int, total_sites: int,
-              keyword_override: str = "") -> None:
-    """Run the full audit pipeline for a single URL."""
+              keyword_override: str = "", backlinks_data: dict | None = None) -> dict | None:
+    """Run the full audit pipeline for a single URL. Returns {format: path} or None."""
     effective_keyword = keyword_override or args.keyword or None
     max_pages_display = args.max_pages if args.max_pages > 0 else "unlimited"
     print()
@@ -392,42 +517,20 @@ def audit_one(target_url: str, output_hint: str | None,
     print(f"  Concurrency: {args.concurrency} async connections")
     print(f"  Keyword    : {effective_keyword or 'not set'}")
     print(f"  PageSpeed  : {'API key set' if pagespeed_key else 'not set (heuristics only)'}")
+    print(f"  Backlinks  : {'live data supplied' if backlinks_data else 'not supplied'}")
+    print(f"  Formats    : {', '.join(args.formats)}")
     print("=" * 60)
 
-    # Async crawl (no session needed — uses aiohttp internally)
-    pages = crawl_site(
-        start_url=target_url,
-        session=None,       # kept for signature compat; unused by async crawler
-        depth=args.depth,
-        max_pages=args.max_pages,
-        delay=args.delay,
-        concurrency=args.concurrency,
-    )
+    crawl_info: dict = {}
+    pages = crawl_site(target_url, depth=args.depth, max_pages=args.max_pages,
+                       delay=args.delay, concurrency=args.concurrency, crawl_info=crawl_info)
 
     if not pages:
         print(f"[SKIP] Could not fetch {target_url} — skipping.\n")
-        return
+        return None
 
-    all_urls = [p["url"] for p in pages]
-
-    # Build a sync requests.Session for check modules that still need it
-    sync_session = requests.Session()
-    sync_session.verify = False
-    requests.packages.urllib3.disable_warnings()
-
-    shared_state = {
-        "base_url":           f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}",
-        "session":            sync_session,
-        "all_urls":           all_urls,
-        "pagespeed_api_key":  pagespeed_key,
-        "keyword":            effective_keyword,
-        "seen_titles":        set(),
-        "seen_h1s":           set(),
-        "seen_canonicals":    {},
-        "content_hashes":     {},
-        "sitemap_urls":       [],
-        "robots_txt_content": "",
-    }
+    shared_state = build_shared_state(target_url, pages, crawl_info, pagespeed_key,
+                                      effective_keyword, backlinks_data)
 
     from checks import ALL_CHECKS
     print(f"\n[CHECKS] Running all {len(ALL_CHECKS)} SEO modules across {len(pages)} page(s)...")
@@ -438,31 +541,24 @@ def audit_one(target_url: str, output_hint: str | None,
           f"(passed: {score['passed']}, failed: {score['failed']}, "
           f"warnings: {score['warnings']}, total: {score['total']})")
 
-    import report_generator
-    import report_generator_html
-    os.makedirs("reports", exist_ok=True)
-
+    os.makedirs(args.output_dir, exist_ok=True)
     domain = urlparse(target_url).netloc.replace("www.", "").replace(":", "_")
     base_name = output_hint or f"{domain}_{date.today()}"
-    base_name = base_name.replace(".docx", "").replace(".html", "")
-
-    docx_path = os.path.join("reports", base_name + ".docx")
-    html_path = os.path.join("reports", base_name + ".html")
+    for ext in (".docx", ".html", ".json"):
+        base_name = base_name.replace(ext, "")
 
     metadata = {
         "url":           target_url,
         "date":          time.strftime("%Y-%m-%d %H:%M:%S"),
         "depth":         args.depth,
         "pages_crawled": len(pages),
-        "pages_list":    all_urls,
+        "pages_list":    shared_state["all_urls"],
         "keyword":       effective_keyword or "",
     }
 
-    print(f"\n[REPORT] Generating reports...")
-    docx_path = report_generator.generate_report(all_results, score, metadata, docx_path)
-    print(f"[REPORT] DOCX saved: {os.path.abspath(docx_path)}")
-    html_path = report_generator_html.generate_html_report(all_results, score, metadata, html_path)
-    print(f"[REPORT] HTML saved: {os.path.abspath(html_path)}")
+    print("\n[REPORT] Generating reports...")
+    return write_reports(all_results, score, metadata,
+                         os.path.join(args.output_dir, base_name), args.formats)
 
 
 # ---------------------------------------------------------------------------
@@ -476,16 +572,18 @@ def main():
     if pagespeed_key == "your_key_here":
         pagespeed_key = ""
 
+    backlinks_data = load_backlinks_file(args.backlinks_json)
+
     targets = load_targets(args)
     total   = len(targets)
 
     for i, (url, output_hint) in enumerate(targets, start=1):
         audit_one(url, output_hint, args, pagespeed_key, i, total,
-                  keyword_override=target_keyword)
+                  keyword_override=target_keyword, backlinks_data=backlinks_data)
 
     print(f"\n{'='*60}")
     print(f"  All done — {total} site(s) audited.")
-    print(f"  Reports saved in: {os.path.abspath('reports')}/")
+    print(f"  Reports saved in: {os.path.abspath(args.output_dir)}/")
     print(f"{'='*60}\n")
 
 

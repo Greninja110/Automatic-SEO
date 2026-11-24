@@ -1,7 +1,6 @@
 """Module 13: Redirects"""
 import re
-import time
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urljoin
 
 
 def check_redirects(url: str, soup, response, session=None, **kwargs) -> dict:
@@ -64,12 +63,12 @@ def check_redirects(url: str, soup, response, session=None, **kwargs) -> dict:
     # 3. Redirect is 301 (permanent) vs 302
     if response.history:
         first_redirect_status = response.history[0].status_code
-        if first_redirect_status == 301:
+        if first_redirect_status in (301, 308):
             checks.append({"name": "Redirects use 301 (permanent)", "status": "pass",
-                            "detail": f"First redirect is 301 Permanent"})
-        elif first_redirect_status == 302:
+                            "detail": f"First redirect is {first_redirect_status} Permanent"})
+        elif first_redirect_status in (302, 303, 307):
             checks.append({"name": "Redirects use 301 (permanent)", "status": "warning",
-                            "detail": "Redirect is 302 (temporary) — use 301 unless truly temporary"})
+                            "detail": f"Redirect is {first_redirect_status} (temporary) — use 301 unless truly temporary"})
         else:
             checks.append({"name": "Redirects use 301 (permanent)", "status": "warning",
                             "detail": f"Redirect status: {first_redirect_status}"})
@@ -104,10 +103,10 @@ def check_redirects(url: str, soup, response, session=None, **kwargs) -> dict:
     # 6. Trailing slash consistency
     canonical = soup.find("link", rel="canonical")
     if canonical and canonical.get("href"):
-        canon_href = canonical["href"]
+        canon_href = urljoin(url, canonical["href"].strip())
         # Both should agree on trailing slash
         url_has_slash = parsed.path.endswith("/")
-        canon_has_slash = canon_href.rstrip("?#").endswith("/")
+        canon_has_slash = urlparse(canon_href).path.endswith("/")
         if url_has_slash == canon_has_slash:
             checks.append({"name": "Trailing slash consistency", "status": "pass",
                             "detail": f"URL and canonical agree on trailing slash"})
@@ -157,7 +156,9 @@ def check_redirects(url: str, soup, response, session=None, **kwargs) -> dict:
     # 10. Link equity preserved (informational — all redirects reach canonical)
     if response.history:
         chain = " → ".join([r.url[:50] for r in response.history] + [response.url[:50]])
-        checks.append({"name": "Link equity preserved (redirects reach canonical)", "status": "warning",
+        final_ok = response.status_code == 200 and len(response.history) <= 1
+        checks.append({"name": "Link equity preserved (redirects reach canonical)",
+                        "status": "pass" if final_ok else "warning",
                         "detail": f"Redirect chain: {chain}"})
     else:
         checks.append({"name": "Link equity preserved (redirects reach canonical)", "status": "pass",

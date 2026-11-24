@@ -2,6 +2,8 @@
 import re
 from urllib.parse import urljoin
 
+from checks._http import head_status, parallel_map
+
 
 def check_image_optimization(url: str, soup, response, session=None, **kwargs) -> dict:
     checks = []
@@ -43,7 +45,6 @@ def check_image_optimization(url: str, soup, response, session=None, **kwargs) -
     srcs = [img.get("src", "") for img in imgs]
     webp_count = sum(1 for s in srcs if s.lower().endswith(".webp"))
     gif_count = sum(1 for s in srcs if s.lower().endswith(".gif"))
-    png_count = sum(1 for s in srcs if s.lower().endswith(".png"))
     if webp_count >= total_imgs * 0.5:
         checks.append({"name": "Modern image formats (WebP)", "status": "pass", "detail": f"{webp_count}/{total_imgs} images use WebP format"})
     elif gif_count > 0:
@@ -51,21 +52,21 @@ def check_image_optimization(url: str, soup, response, session=None, **kwargs) -
     else:
         checks.append({"name": "Modern image formats (WebP)", "status": "warning", "detail": f"Only {webp_count}/{total_imgs} images use WebP — consider converting JPEG/PNG to WebP"})
 
-    # 5. Image file sizes (HEAD request sample — first 5 images)
-    oversized = []
+    # One concurrent HEAD pass over the first 10 images, reused by checks 5 and 9
+    head_results = []  # (src, status, content_length)
     if session:
-        for img in imgs[:5]:
-            src = img.get("src", "")
-            if not src or src.startswith("data:"):
-                continue
-            img_url = urljoin(url, src)
-            try:
-                head = session.head(img_url, timeout=5, allow_redirects=True)
-                content_length = int(head.headers.get("content-length", 0))
-                if content_length > 500_000:
-                    oversized.append(f"{src[:50]} ({content_length//1024}KB)")
-            except Exception:
-                pass
+        sample = [img.get("src", "") for img in imgs[:10]]
+        sample = [s for s in sample if s and not s.startswith("data:")]
+
+        def _probe(src):
+            status, r = head_status(session, urljoin(url, src), timeout=5)
+            size = int(r.headers.get("content-length", 0) or 0) if r is not None else 0
+            return src, status, size
+
+        head_results = parallel_map(_probe, sample)
+
+    # 5. Image file sizes
+    oversized = [f"{src[:50]} ({size // 1024}KB)" for src, _, size in head_results if size > 500_000]
     if oversized:
         checks.append({"name": "Image file sizes (≤500KB)", "status": "fail", "detail": f"Oversized images: {oversized}"})
     else:
@@ -101,19 +102,7 @@ def check_image_optimization(url: str, soup, response, session=None, **kwargs) -
                         "detail": f"{len(bad_length_alts)} alt text(s) outside recommended 5–125 char range"})
 
     # 9. No broken image URLs
-    broken_imgs = []
-    if session:
-        for img in imgs[:10]:
-            src = img.get("src", "")
-            if not src or src.startswith("data:"):
-                continue
-            img_url = urljoin(url, src)
-            try:
-                head = session.head(img_url, timeout=5, allow_redirects=True)
-                if head.status_code >= 400:
-                    broken_imgs.append(f"{src[:50]} ({head.status_code})")
-            except Exception:
-                pass
+    broken_imgs = [f"{src[:50]} ({status})" for src, status, _ in head_results if status and status >= 400]
     if broken_imgs:
         checks.append({"name": "No broken image URLs", "status": "fail", "detail": f"Broken images: {broken_imgs}"})
     else:
