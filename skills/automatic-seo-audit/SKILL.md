@@ -16,7 +16,7 @@ Ask only for what is missing:
 | Input | Default | Notes |
 |---|---|---|
 | Website URL | — (required) | Only audit sites the user owns or is authorised to test. |
-| Target keyword | none | A word or phrase, e.g. `humic acid fertilizer`. Enables density checks. |
+| Target keyword | none | A word or phrase, e.g. `trail running shoes`. Enables density checks. |
 | Crawl size | depth 1, 25 pages | Raise to depth 2 / 100 pages for a full-site audit (slower). |
 | Report formats | `json,html` | Add `docx` when the user wants a client-ready Word report. |
 

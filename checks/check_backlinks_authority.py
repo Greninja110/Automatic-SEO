@@ -134,11 +134,11 @@ def check_backlinks_authority(url: str, soup, response, **kwargs) -> dict:
         checks.append({"name": "Link attribute consistency", "status": "pass",
                         "detail": f"Consistent link policy: {'nofollow' if has_nofollow else 'dofollow'}"})
 
-    # 10. Authority signals (manual verification notice)
-    checks.append({"name": "Domain authority (manual verification)", "status": "warning",
-                    "detail": (f"Automated DA/DR scores require Ahrefs or Moz API. "
-                               f"This page has {len(dofollow_ext)} outbound dofollow links. "
-                               f"Manual check recommended at: https://ahrefs.com/backlink-checker")})
+    # 10. Authority signals (inbound data lives in module 25)
+    checks.append({"name": "Domain authority (see module 25)", "status": "warning",
+                    "detail": (f"This module only sees on-page links ({len(dofollow_ext)} outbound dofollow). "
+                               f"Inbound links and authority are scored by module 25 "
+                               f"when backlink data is supplied (--backlinks-json).")})
 
     passed = sum(1 for c in checks if c["status"] == "pass")
     failed = sum(1 for c in checks if c["status"] == "fail")

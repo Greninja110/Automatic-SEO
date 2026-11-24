@@ -27,7 +27,17 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from requests.structures import CaseInsensitiveDict
 
+from checks._http import USER_AGENT
+
 load_dotenv()
+
+# Windows consoles and piped output (e.g. when an AI agent runs this script)
+# often default to cp1252, which cannot print the arrows and check marks below.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 # ===========================================================================
 # CONFIGURATION — edit these variables for quick testing
@@ -35,11 +45,11 @@ load_dotenv()
 
 # Set a single URL here to test just one site without editing targets.txt.
 # Leave as empty string "" to use targets.txt instead.
-target_website = "https://openai.com/"
+target_website = ""
 
 # Primary SEO keyword for density and heading checks.
 # Leave as empty string "" if you don't want keyword analysis.
-# Examples: "humic acid", "humic acid fertilizer", "buy humic acid"
+# Examples: "running shoes", "trail running shoes", "buy running shoes"
 target_keyword = ""
 
 # Path to the targets file (one URL per line, # prefix = skip that line)
@@ -251,7 +261,7 @@ async def crawl_site_async(start_url: str, depth: int = 1,
 
     connector = aiohttp.TCPConnector(ssl=False, limit=concurrency)  # audit sites with broken TLS too
     semaphore = asyncio.Semaphore(concurrency)
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SEOAuditBot/2.0; +https://github.com/seo-audit-tool)"}
+    headers = {"User-Agent": USER_AGENT}
 
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         while current_level:

@@ -60,7 +60,7 @@ def check_content_quality(url: str, soup, response, keyword: str = None,
 
     # 4. Keyword density
     if keyword:
-        # Works for phrases too ("humic acid"): count phrase occurrences, then
+        # Works for phrases too ("running shoes"): count phrase occurrences, then
         # density = words belonging to the phrase / all words.
         kw_tokens = re.findall(r'\b\w+\b', keyword.lower())
         n = len(kw_tokens) or 1

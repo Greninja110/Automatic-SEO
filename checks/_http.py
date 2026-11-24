@@ -16,8 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from requests.adapters import HTTPAdapter
 
-USER_AGENT = ("Mozilla/5.0 (compatible; SEOAuditBot/2.0; "
-              "+https://github.com/seo-audit-tool)")
+USER_AGENT = "Mozilla/5.0 (compatible; SEOAuditBot/2.0)"
 
 
 class CachedSession(requests.Session):

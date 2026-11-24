@@ -184,7 +184,16 @@ agent runs real measurements and reports numbers instead of guessing. The code i
 on GitHub, so the $1 pays for the convenience of a ready-made, maintained agent workflow, not for
 access to secrets.
 
-## 10. Where things are
+## 10. Update 1.1 (same day)
+
+- Removed every hard-coded website from the engine: the old default target (`openai.com`), a
+  made-up project URL in the crawler's User-Agent (now just `SEOAuditBot/2.0`), an Ahrefs link in
+  check 23's advice (it now points to check 25), and leftover client keyword examples.
+- Fixed a crash on Windows when an AI agent runs the engine and captures its output: the console's
+  cp1252 encoding could not print `→` or `✓`. Output is now forced to UTF-8.
+- Rebuilt and re-tested the package as a buyer would, then shipped it as version 1.1.
+
+## 11. Where things are
 
 | Path | What |
 |---|---|
@@ -198,11 +207,10 @@ access to secrets.
 | `skills/logo/`, `skills/screenshots/` | Marketplace images |
 | `assets/` | Project documents (git-ignored) |
 
-## 11. Follow-ups
+## 12. Follow-ups
 
 - [ ] Create a new **Google PageSpeed API key**. The one in `.env` is rejected by Google, so real
       Core Web Vitals have never been used. Delete the old key in Google Cloud.
-- [ ] Commit and push this work to GitHub so the listing's source link shows the current code.
 - [ ] When the engine changes, rebuild the ZIP and ship it with Agensi's `update_skill`. The live
       version keeps serving buyers while the update is reviewed.
 - [ ] Watch uses, ratings and feedback (`my_skills`) and answer buyer questions through the
